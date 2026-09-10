@@ -1,0 +1,9 @@
+# 运行期产物
+token
+logs/
+*.log
+
+# 本地环境
+node_modules/
+.DS_Store
+.env
