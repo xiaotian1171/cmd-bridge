@@ -243,8 +243,9 @@ cmd-bridge/
 
 - Debian 系 Linux x86_64，96 核 / 499 GB / 11 TB，Node v24.19.0，npm 11.17.0；另在 Alpine/musl（Node v24.20.0）环境跑通
 - supergateway + desktop-commander 0.2.50，协议版本 2024-11-05
-- ngrok v3.39.11（Linux x86_64）：下载源、`http` 与 `config` 子命令参数已实测；未配 authtoken 时的报错形态已实测
-- 已验证：工具列表拉取、真实命令执行（含中文输出）、长驻进程增量轮询、交互写输入、通过 cloudflared 公网隧道回环调用
+- ngrok v3.39.11（Linux x86_64）：下载源、`http` 与 `config` 子命令参数已实测；未配 authtoken 时的 `ERR_NGROK_4018` 报错形态已实测；取地址逻辑用真实日志验证（认 logfmt 的 `url=` 字段，不会误抓日志里的 `dashboard.ngrok.com`）
+- ngrok 免费版实测：MCP 客户端直接 POST 即可，不需要 `ngrok-skip-browser-warning` 头；浏览器警告页只影响用浏览器手动打开域名
+- 已验证：工具列表拉取（26 个）、真实命令执行（含中文输出）、长驻进程增量轮询、交互写输入、通过 cloudflared 与 ngrok 两种公网隧道从外网回环调用（`start_process` 真实执行 + `read_file` 读回）
 - **Windows 端（install.ps1 / start.ps1 / stop.ps1 / check.ps1）未在真机验证**，桌面执行引擎等组件均声明支持 Windows，理论上可直接跑；遇到问题请开 issue 附日志
 
 ## 说明
