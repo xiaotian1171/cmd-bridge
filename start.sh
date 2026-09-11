@@ -197,7 +197,7 @@ case "$TUNNEL" in
 
     if [ -n "$CF_TOKEN" ]; then
       # 自有域名模式：connector 用 token 接入，域名/路由在 CF 后台（remotely-managed）配置
-      setsid nohup "$CF_BIN" tunnel run --token "$CF_TOKEN" --no-autoupdate \
+      setsid nohup "$CF_BIN" --no-autoupdate tunnel run --token "$CF_TOKEN" \
         > "$LOG_DIR/cf.log" 2>&1 </dev/null &
       for _ in $(seq 1 30); do
         grep -q 'Registered tunnel connection' "$LOG_DIR/cf.log" 2>/dev/null && break
