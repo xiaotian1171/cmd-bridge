@@ -22,7 +22,11 @@ while true; do
     TUN="$(cat "$BRIDGE_HOME_DIR/tunnel_mode" 2>/dev/null || echo none)"
     MOD="$(cat "$BRIDGE_HOME_DIR/run_mode" 2>/dev/null || echo full)"
     TLSF="$(cat "$BRIDGE_HOME_DIR/run_tls" 2>/dev/null || echo 0)"
-    BRIDGE_TUNNEL="$TUN" BRIDGE_MODE="$MOD" BRIDGE_TLS="$TLSF" nohup bash "$SCRIPT_DIR/start.sh" >> "$LOG" 2>&1
+    CFT="$(cat "$BRIDGE_HOME_DIR/cf_token" 2>/dev/null || echo '')"
+    CFD="$(cat "$BRIDGE_HOME_DIR/cf_domain" 2>/dev/null || echo '')"
+    BRIDGE_TUNNEL="$TUN" BRIDGE_MODE="$MOD" BRIDGE_TLS="$TLSF" \
+      BRIDGE_CF_TOKEN="$CFT" BRIDGE_CF_DOMAIN="$CFD" \
+      nohup bash "$SCRIPT_DIR/start.sh" >> "$LOG" 2>&1
   fi
   sleep 5
 done

@@ -86,6 +86,7 @@ bash start.sh                      # 默认走 cloudflared
 BRIDGE_TUNNEL=ngrok bash start.sh  # 改走 ngrok
 BRIDGE_TUNNEL=none  bash start.sh  # 只监听本机
 BRIDGE_TUNNEL=none BRIDGE_TLS=1 bash start.sh  # 直连 + 强制 HTTPS（自签证书）
+BRIDGE_CF_TOKEN=eyJ... BRIDGE_CF_DOMAIN=mcp.example.eu.org bash start.sh  # cloudflared 走自己域名（CF 后台绑 mcp.example.eu.org → http://localhost:8000）
 ```
 
 **Windows（PowerShell）：**
@@ -164,6 +165,8 @@ PY
 | `BRIDGE_TUNNEL` | `cloudflare` | 公网出口：`cloudflare` \| `ngrok` \| `none` |
 | `BRIDGE_NO_TUNNEL` | — | 旧参数，设为 `1` 等价于 `BRIDGE_TUNNEL=none` |
 | `BRIDGE_TLS` | `0` | `1` = 直连模式（`BRIDGE_TUNNEL=none`）强制 HTTPS：supergateway 退到本机内部端口，`tls-proxy.cjs` 用自签证书在 `BRIDGE_PORT` 提供 HTTPS，HTTP 不出本机。隧道模式下忽略（出口已是 HTTPS） |
+| `BRIDGE_CF_TOKEN` | — | `BRIDGE_TUNNEL=cloudflare` 时设为 CF tunnel token（`eyJ...`）→ 走自己域名（域名在 CF 后台 Public Hostname 绑定，Service 填 `http://localhost:$BRIDGE_PORT`）；留空走 trycloudflare 快速通道 |
+| `BRIDGE_CF_DOMAIN` | — | 可选，配合 `BRIDGE_CF_TOKEN`，填 CF 绑定的域名（如 `mcp.example.eu.org`），仅用于启动回显完整地址 |
 | `NGROK_AUTHTOKEN` | — | `BRIDGE_TUNNEL=ngrok` 时使用，ngrok 自身也会读取该变量 |
 | `BRIDGE_NPM_PREFIX` | `~/.bridge-npm` | MCP 组件安装位置 |
 | `BRIDGE_HOME` | `~/.bridge` | token、日志、隧道二进制的存放位置 |
@@ -177,12 +180,18 @@ BRIDGE_MODE=admin bash start.sh                     # 权限全开：清空命�
 
 ### 隧道怎么选
 
-| | cloudflared quick tunnel（默认） | ngrok |
-| --- | --- | --- |
-| 账号 | 不需要 | 需注册免费账号并拿 authtoken |
-| 每次启动的域名 | 随机 `*.trycloudflare.com`，重启必换 | 随机 `*.ngrok-free.app`，重启必换 |
-| 适用场景 | 通用，开箱即用 | Cloudflare 出口被限制或连不通的机器 |
-| 已知限制 | 首次域名 DNS 传播可能需一两分钟 | 免费版同一账号同时只允许 1 个 agent 会话在线；浏览器直接访问会撞警告页（MCP 客户端不受影响） |
+| | cloudflared quick tunnel（默认） | cloudflared 自有域名（token） | ngrok |
+| --- | --- | --- | --- |
+| 账号 | 不需要 | 需 CF 账号 + 自己的域名接入 CF | 需注册免费账号并拿 authtoken |
+| 每次启动的域名 | 随机 `*.trycloudflare.com`，重启必换 | **固定**（自己域名），正规证书自动续期 | 随机 `*.ngrok-free.app`，重启必换 |
+| 适用场景 | 通用，开箱即用 | 长期挂机、给 ChatGPT 等严格校验证书的客户端用 | Cloudflare 出口被限制或连不通的机器 |
+| 已知限制 | 首次域名 DNS 传播可能需一两分钟 | 需一次性在 CF 后台建 tunnel 并绑 Public Hostname | 免费版同一账号同时只允许 1 个 agent 会话在线；浏览器直接访问会撞警告页（MCP 客户端不受影响） |
+
+cloudflared 自有域名配置（CF 后台一次性操作）：Zero Trust → Networks → Tunnels → Create a tunnel（Cloudflared）→ 复制 token → Public Hostname 填子域名、Service 填 `http://localhost:8000`。之后：
+
+```bash
+BRIDGE_CF_TOKEN=eyJ... BRIDGE_CF_DOMAIN=mcp.example.eu.org bash start.sh
+```
 
 ngrok 首次配置（只需一次）：
 

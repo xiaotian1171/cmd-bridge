@@ -67,6 +67,8 @@ fi
 printf '%s' "$TUNNEL" > "$BRIDGE_HOME_DIR/tunnel_mode"
 printf '%s' "$MODE" > "$BRIDGE_HOME_DIR/run_mode"
 printf '%s' "$TLS_ON" > "$BRIDGE_HOME_DIR/run_tls"
+printf '%s' "$CF_TOKEN" > "$BRIDGE_HOME_DIR/cf_token"
+printf '%s' "$CF_DOMAIN" > "$BRIDGE_HOME_DIR/cf_domain"
 
 # ---------- 前置检查 ----------
 [ -x "$NPM_PREFIX/bin/supergateway" ] || { echo "未安装 supergateway，请先执行 bash install.sh" >&2; exit 1; }
@@ -190,16 +192,39 @@ case "$TUNNEL" in
     pkill -f 'cloudflared tunnel' 2>/dev/null || true
     sleep 1
     : > "$LOG_DIR/cf.log"
-    setsid nohup "$CF_BIN" tunnel --url "http://localhost:$PORT" --no-autoupdate \
-      > "$LOG_DIR/cf.log" 2>&1 </dev/null &
 
-    for _ in $(seq 1 30); do
-      PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG_DIR/cf.log" 2>/dev/null | head -1 || true)"
-      [ -n "$PUBLIC_URL" ] && break
-      sleep 2
-    done
+    if [ -n "$CF_TOKEN" ]; then
+      # 自有域名模式：connector 用 token 接入，域名/路由在 CF 后台（remotely-managed）配置
+      setsid nohup "$CF_BIN" tunnel run --token "$CF_TOKEN" --no-autoupdate \
+        > "$LOG_DIR/cf.log" 2>&1 </dev/null &
+      for _ in $(seq 1 30); do
+        grep -q 'Registered tunnel connection' "$LOG_DIR/cf.log" 2>/dev/null && break
+        if grep -qE 'lvl=(error|crit|fatal)' "$LOG_DIR/cf.log" 2>/dev/null; then break; fi
+        sleep 2
+      done
+      if grep -q 'Registered tunnel connection' "$LOG_DIR/cf.log" 2>/dev/null; then
+        if [ -n "$CF_DOMAIN" ]; then
+          PUBLIC_URL="https://$CF_DOMAIN"
+        else
+          echo "隧道已连上。域名在 CF 后台 Public Hostname 绑定（Service 填 http://localhost:$PORT）；设 BRIDGE_CF_DOMAIN 可在启动时回显完整地址" >&2
+        fi
+      else
+        echo "⚠ CF tunnel（token 模式）未确认就绪，查看 $LOG_DIR/cf.log" >&2
+        grep -E 'lvl=(error|crit|fatal)' "$LOG_DIR/cf.log" 2>/dev/null | head -3 >&2 || true
+      fi
+    else
+      # 快速通道：trycloudflare 临时域名，免账号免域名，地址随机
+      setsid nohup "$CF_BIN" tunnel --url "http://localhost:$PORT" --no-autoupdate \
+        > "$LOG_DIR/cf.log" 2>&1 </dev/null &
 
-    if [ -z "$PUBLIC_URL" ]; then
+      for _ in $(seq 1 30); do
+        PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG_DIR/cf.log" 2>/dev/null | head -1 || true)"
+        [ -n "$PUBLIC_URL" ] && break
+        sleep 2
+      done
+    fi
+
+    if [ -z "$PUBLIC_URL" ] && [ -z "$CF_TOKEN" ]; then
       echo "⚠ 隧道地址未取到，稍后查看 $LOG_DIR/cf.log" >&2
     fi
     ;;
