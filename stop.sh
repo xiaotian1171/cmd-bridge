@@ -15,5 +15,8 @@ pkill -f 'cloudflared tunnel' 2>/dev/null && echo "已停止" || echo "未在运
 echo "停止 ngrok..."
 pkill -f 'ngrok http' 2>/dev/null && echo "已停止" || echo "未在运行"
 
+echo "停止 keepalive 守护..."
+pkill -f 'cmd-bridge/keepalive.sh' 2>/dev/null && echo "已停止" || echo "未在运行"
+
 sleep 1
 echo "完成。token 与日志保留在 \${BRIDGE_HOME:-$HOME/.bridge}。"

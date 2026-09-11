@@ -61,8 +61,10 @@ if [ "$MODE" = "safe" ]; then
   ENGINE="$NODE_BIN $SCRIPT_DIR/filter-proxy.js"
   ENGINE_DESC="filter-proxy.js 白名单代理（终端类 6 个工具）"
 else
-  ENGINE="$NPM_PREFIX/bin/desktop-commander"
-  ENGINE_DESC="desktop-commander（26 个工具全开）"
+  # chatgpt-compat.cjs 剥离 desktop-commander 工具上的 Apps SDK widget 元数据，
+  # 否则 ChatGPT 自定义连接器会转走 widget 流程导致创建失败（详见该文件头注释）。
+  ENGINE="$NODE_BIN $SCRIPT_DIR/chatgpt-compat.cjs -- $NPM_PREFIX/bin/desktop-commander"
+  ENGINE_DESC="desktop-commander（26 个工具全开，含 ChatGPT 兼容层）"
 fi
 
 # ---------- 启动协议转换层 ----------
@@ -70,7 +72,12 @@ pkill -f 'supergateway' 2>/dev/null || true
 pkill -f 'desktop-commander' 2>/dev/null || true
 sleep 1
 
-setsid nohup "$NPM_PREFIX/bin/supergateway" \
+# supergateway 3.4.3 有已知崩溃 bug：客户端断开连接会触发未处理异常直接杀进程。
+# 存在 dist/index.js 时用 `node -r` 预加载 sg-hook.cjs 护栏；否则退回 bin 启动（无护栏）。
+SG_ENTRY="$NPM_PREFIX/lib/node_modules/supergateway/dist/index.js"
+SG_LAUNCH=("$NPM_PREFIX/bin/supergateway")
+[ -f "$SG_ENTRY" ] && SG_LAUNCH=("$NODE_BIN" -r "$SCRIPT_DIR/sg-hook.cjs" "$SG_ENTRY")
+setsid nohup "${SG_LAUNCH[@]}" \
   --stateful --cors \
   --stdio "$ENGINE" \
   --streamableHttpPath "/mcp/$TOKEN" \

@@ -194,12 +194,26 @@ export NGROK_AUTHTOKEN=<TOKEN>
 BRIDGE_TUNNEL=ngrok bash start.sh
 ```
 
+### 进程守护（可选）
+
+supergateway 3.4.3 有一个已知 bug：MCP 客户端断开连接时会产生未处理异常并使进程退出（表现为桥突然失联，`~/.bridge/logs/sg.log` 尾部有异常栈）。本仓库已内置修复：`start.sh` 检测到 `dist/index.js` 时会用 `node -r sg-hook.cjs` 预加载异常护栏，这类异常只记录（`[sg-hook]` 前缀）不再杀进程，一个客户端断开不影响其他人继续使用。
+
+如需"桥挂了自动拉起"，另起一个守护进程（每 5 秒检查进程与端口，按 `~/.bridge/tunnel_mode` 里记录的上次隧道模式重启）：
+
+```bash
+nohup bash keepalive.sh >/dev/null 2>&1 &
+```
+
+`bash stop.sh` 会一并停掉守护；手动停守护：`pkill -f cmd-bridge/keepalive.sh`。
+
 ## 排障
 
 | 现象 | 原因与处理 |
 | --- | --- |
 | `read_process_output` 报 `No session found for PID xxx` | supergateway 少了 `--stateful`，每个请求都会重开执行引擎实例，进程 session 丢失。本仓库脚本已内置。 |
 | 自定义客户端第二次请求返回 `400 Bad Request` | 有状态模式下必须回传首个响应头里的 `Mcp-Session-Id`，检查客户端是否把它丢了。 |
+| 桥突然失联，`~/.bridge/logs/sg.log` 尾部有 `[sg-hook]` 异常记录 | supergateway 3.4.3 已知 bug：客户端断开连接时未处理异常会杀掉整个进程。本仓库 `start.sh` 已自动挂护栏（`sg-hook.cjs`），异常只记日志不再崩；也可加 `keepalive.sh` 守护自动拉起（见下文"进程守护"）。 |
+| ChatGPT 创建连接器报 Something went wrong | desktop-commander 0.2.50 给部分工具带了 OpenAI Apps SDK 的 widget 元数据（`_meta`），ChatGPT 会转去读 widget 资源导致创建失败。仓库已内置 `chatgpt-compat.cjs` 兼容层并由 `start.sh` 自动挂载（full 模式），无需额外配置。 |
 | 启动后 stdout 全空、连接断开 | 命令里含 `pkill -f supergateway` 之类的自匹配串，把承载命令的 shell 自己杀了。放进脚本文件再执行。 |
 | 重启后旧公网地址失效 | 两种隧道的域名都随进程变化，去 `~/.bridge/logs/cf.log` 或 `ng.log` 取新地址。 |
 | ngrok 启动后取不到地址，日志有 `ERR_NGROK_4018` | 没配 authtoken。执行 `~/.bridge/bin/ngrok config add-authtoken <TOKEN>`，或启动前 `export NGROK_AUTHTOKEN=<TOKEN>`。 |
@@ -228,7 +242,10 @@ BRIDGE_TUNNEL=ngrok bash start.sh
 cmd-bridge/
 ├── install.sh       # 安装 MCP 组件与两种隧道二进制（幂等）——Linux / macOS
 ├── start.sh         # 启动桥（含公网隧道，默认 cloudflared）——Linux / macOS
-├── stop.sh          # 停止——Linux / macOS
+├── stop.sh          # 停止（含 keepalive 守护）——Linux / macOS
+├── keepalive.sh     # 可选进程守护：桥意外退出 5 秒内自动拉起——Linux / macOS
+├── sg-hook.cjs      # supergateway 崩溃护栏（start.sh 自动通过 node -r 挂载，勿单独运行）
+├── chatgpt-compat.cjs # ChatGPT 兼容层：剥离 Apps SDK widget 元数据（full 模式自动挂载）
 ├── install.ps1      # 同 install.sh——Windows（PowerShell 5.1+）
 ├── start.ps1        # 同 start.sh——Windows
 ├── stop.ps1         # 停止——Windows
@@ -242,7 +259,8 @@ cmd-bridge/
 ## 已验证环境
 
 - Debian 系 Linux x86_64，96 核 / 499 GB / 11 TB，Node v24.19.0，npm 11.17.0；另在 Alpine/musl（Node v24.20.0）环境跑通
-- supergateway + desktop-commander 0.2.50，协议版本 2024-11-05
+- supergateway 3.4.3 + desktop-commander 0.2.50，协议版本 2024-11-05
+- Ubuntu 22.x x86_64（Oracle Cloud，2 核 / 954 MB）：`BRIDGE_TUNNEL=none` 公网直连与 ngrok https 出口实测；supergateway 客户端断开崩溃 bug 已复现，`sg-hook.cjs` 护栏修复后断开 90 秒存活验证
 - ngrok v3.39.11（Linux x86_64）：下载源、`http` 与 `config` 子命令参数已实测；未配 authtoken 时的 `ERR_NGROK_4018` 报错形态已实测；取地址逻辑用真实日志验证（认 logfmt 的 `url=` 字段，不会误抓日志里的 `dashboard.ngrok.com`）
 - ngrok 免费版实测：MCP 客户端直接 POST 即可，不需要 `ngrok-skip-browser-warning` 头；浏览器警告页只影响用浏览器手动打开域名
 - 已验证：工具列表拉取（26 个）、真实命令执行（含中文输出）、长驻进程增量轮询、交互写输入、通过 cloudflared 与 ngrok 两种公网隧道从外网回环调用（`start_process` 真实执行 + `read_file` 读回）
