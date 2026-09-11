@@ -29,6 +29,8 @@ PORT="${BRIDGE_PORT:-8000}"
 MODE="${BRIDGE_MODE:-full}"
 TUNNEL="${BRIDGE_TUNNEL:-cloudflare}"
 if [ "${BRIDGE_NO_TUNNEL:-0}" = "1" ]; then TUNNEL=none; fi
+CF_TOKEN="${BRIDGE_CF_TOKEN:-}"
+CF_DOMAIN="${BRIDGE_CF_DOMAIN:-}"
 case "$MODE" in
   full|admin|safe) ;;
   *) echo "错误: BRIDGE_MODE 只能是 full | admin | safe（当前: $MODE）" >&2; exit 1 ;;
