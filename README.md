@@ -159,7 +159,7 @@ PY
 | --- | --- | --- |
 | `BRIDGE_TOKEN` | 首次自动生成 | 路径 token，也是访问凭据 |
 | `BRIDGE_PORT` | `8000` | supergateway 监听端口 |
-| `BRIDGE_MODE` | `full` | `full` = 26 个工具全开；`safe` = 白名单 6 个终端工具 |
+| `BRIDGE_MODE` | `full` | `full` = 26 个工具全开（默认安全黑名单）；`admin` = 全开且清空黑名单（sudo/apt 等不再拦截，权限全开）；`safe` = 白名单 6 个终端工具 |
 | `BRIDGE_TUNNEL` | `cloudflare` | 公网出口：`cloudflare` \| `ngrok` \| `none` |
 | `BRIDGE_NO_TUNNEL` | — | 旧参数，设为 `1` 等价于 `BRIDGE_TUNNEL=none` |
 | `NGROK_AUTHTOKEN` | — | `BRIDGE_TUNNEL=ngrok` 时使用，ngrok 自身也会读取该变量 |
@@ -170,6 +170,7 @@ PY
 
 ```bash
 BRIDGE_TUNNEL=none BRIDGE_PORT=9000 BRIDGE_MODE=safe bash start.sh
+BRIDGE_MODE=admin bash start.sh                     # 权限全开：清空命令黑名单（sudo 等不再拦截）
 ```
 
 ### 隧道怎么选
@@ -234,6 +235,8 @@ nohup bash keepalive.sh >/dev/null 2>&1 &
 - ngrok 免费版的隧道域名会被第三方扫描器高频扫描，且 ngrok 面板本身记录访问来源；敏感机器优先选 cloudflared，或干脆 `BRIDGE_TUNNEL=none` 只走内网。
 - 建议：仅自用；`~/.bridge/token` 权限设 600；定期轮换 token；不要在群里、截图里、公开仓库里贴带 token 的完整 URL；更稳妥的做法是把部署机器本身做成隔离环境（容器/独立账号）。
 
+`BRIDGE_MODE=admin` 会清空 desktop-commander 的命令黑名单（`sudo`、`apt` 等全部放行），配合把运行用户加入 docker 组（`sudo usermod -aG docker "$USER"`）后基本等于完全体。此模式下桥等价于一台无限制的 root 远程终端，**只建议在隔离环境（容器/一次性虚拟机/独立低权账号）中开启**。
+
 要收敛风险，可用 `BRIDGE_MODE=safe` 只暴露终端类工具——注意这挡不住 `cat` 读文件，它是"减少误触面"，不是安全边界。
 
 ## 目录结构
@@ -261,6 +264,7 @@ cmd-bridge/
 - Debian 系 Linux x86_64，96 核 / 499 GB / 11 TB，Node v24.19.0，npm 11.17.0；另在 Alpine/musl（Node v24.20.0）环境跑通
 - supergateway 3.4.3 + desktop-commander 0.2.50，协议版本 2024-11-05
 - Ubuntu 22.x x86_64（Oracle Cloud，2 核 / 954 MB）：`BRIDGE_TUNNEL=none` 公网直连与 ngrok https 出口实测；supergateway 客户端断开崩溃 bug 已复现，`sg-hook.cjs` 护栏修复后断开 90 秒存活验证
+- 同机实测 `BRIDGE_MODE=admin`：黑名单清空 + docker 组免 sudo，`sudo`/docker 命令经桥执行正常
 - ngrok v3.39.11（Linux x86_64）：下载源、`http` 与 `config` 子命令参数已实测；未配 authtoken 时的 `ERR_NGROK_4018` 报错形态已实测；取地址逻辑用真实日志验证（认 logfmt 的 `url=` 字段，不会误抓日志里的 `dashboard.ngrok.com`）
 - ngrok 免费版实测：MCP 客户端直接 POST 即可，不需要 `ngrok-skip-browser-warning` 头；浏览器警告页只影响用浏览器手动打开域名
 - 已验证：工具列表拉取（26 个）、真实命令执行（含中文输出）、长驻进程增量轮询、交互写输入、通过 cloudflared 与 ngrok 两种公网隧道从外网回环调用（`start_process` 真实执行 + `read_file` 读回）

@@ -27,12 +27,18 @@ PORT="${BRIDGE_PORT:-8000}"
 MODE="${BRIDGE_MODE:-full}"
 TUNNEL="${BRIDGE_TUNNEL:-cloudflare}"
 if [ "${BRIDGE_NO_TUNNEL:-0}" = "1" ]; then TUNNEL=none; fi
+case "$MODE" in
+  full|admin|safe) ;;
+  *) echo "错误: BRIDGE_MODE 只能是 full | admin | safe（当前: $MODE）" >&2; exit 1 ;;
+esac
 case "$TUNNEL" in
   cloudflare|ngrok|none) ;;
   *) echo "错误: BRIDGE_TUNNEL 只能是 cloudflare | ngrok | none（当前: $TUNNEL）" >&2; exit 1 ;;
 esac
 
 mkdir -p "$LOG_DIR"
+printf '%s' "$TUNNEL" > "$BRIDGE_HOME_DIR/tunnel_mode"
+printf '%s' "$MODE" > "$BRIDGE_HOME_DIR/run_mode"
 
 # ---------- 前置检查 ----------
 [ -x "$NPM_PREFIX/bin/supergateway" ] || { echo "未安装 supergateway，请先执行 bash install.sh" >&2; exit 1; }
@@ -65,6 +71,30 @@ else
   # 否则 ChatGPT 自定义连接器会转走 widget 流程导致创建失败（详见该文件头注释）。
   ENGINE="$NODE_BIN $SCRIPT_DIR/chatgpt-compat.cjs -- $NPM_PREFIX/bin/desktop-commander"
   ENGINE_DESC="desktop-commander（26 个工具全开，含 ChatGPT 兼容层）"
+fi
+
+# BRIDGE_MODE=admin：清空 desktop-commander 的命令黑名单（sudo/apt 等全部放行），权限全开。
+# 桥的 token 就是全部凭据，此模式下持有 URL 的人可执行任意命令（含 root），仅在隔离
+# 环境（容器/一次性虚拟机/独立低权账号）或明确知晓风险时使用。若需免 sudo 操作
+# docker，另执行一次：sudo usermod -aG docker "$USER"
+if [ "$MODE" = "admin" ]; then
+  python3 - "$HOME" <<'PY' || true
+import json, os, sys
+cands = [
+    os.path.join(sys.argv[1], ".claude-server-commander", "config.json"),
+    os.path.join(sys.argv[1], "desktop-commander", "config.json"),
+]
+for p in cands:
+    if os.path.isfile(p):
+        c = json.load(open(p))
+        c["blockedCommands"] = []
+        json.dump(c, open(p, "w"), indent=2)
+        print("已清空命令黑名单:", p)
+        break
+else:
+    print("⚠ 未找到 desktop-commander 配置文件，黑名单保持默认；桥跑过一次后再执行 start.sh 即可生效")
+PY
+  ENGINE_DESC="desktop-commander（26 个工具全开，黑名单已清空 = 权限全开）"
 fi
 
 # ---------- 启动协议转换层 ----------
