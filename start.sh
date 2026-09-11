@@ -10,7 +10,9 @@
 #   BRIDGE_TOKEN       路径 token，不传则复用 ~/.bridge/token，首次自动生成
 #   BRIDGE_PORT        supergateway 端口，默认 8000
 #   BRIDGE_MODE        full（默认，26 工具全开）| safe（白名单 6 个终端工具）
-#   BRIDGE_NO_TUNNEL   设为 1 则只监听本地，不启动 cloudflared
+#   BRIDGE_TUNNEL      cloudflare（默认）| ngrok | none
+#   BRIDGE_NO_TUNNEL   旧参数，设为 1 等价于 BRIDGE_TUNNEL=none
+#   NGROK_AUTHTOKEN    BRIDGE_TUNNEL=ngrok 时用；ngrok 自身也会读取该变量
 #   BRIDGE_NPM_PREFIX  MCP 组件安装位置，默认 ~/.bridge-npm
 #   BRIDGE_HOME        token/日志存放位置，默认 ~/.bridge
 
@@ -23,7 +25,12 @@ LOG_DIR="$BRIDGE_HOME_DIR/logs"
 
 PORT="${BRIDGE_PORT:-8000}"
 MODE="${BRIDGE_MODE:-full}"
-NO_TUNNEL="${BRIDGE_NO_TUNNEL:-0}"
+TUNNEL="${BRIDGE_TUNNEL:-cloudflare}"
+if [ "${BRIDGE_NO_TUNNEL:-0}" = "1" ]; then TUNNEL=none; fi
+case "$TUNNEL" in
+  cloudflare|ngrok|none) ;;
+  *) echo "错误: BRIDGE_TUNNEL 只能是 cloudflare | ngrok | none（当前: $TUNNEL）" >&2; exit 1 ;;
+esac
 
 mkdir -p "$LOG_DIR"
 
@@ -86,32 +93,70 @@ echo "✔ 桥已就绪（$ENGINE_DESC）"
 
 # ---------- 启动公网隧道 ----------
 PUBLIC_URL=""
-if [ "$NO_TUNNEL" != "1" ]; then
-  CF_BIN="$BRIDGE_HOME_DIR/bin/cloudflared"
-  [ -x "$CF_BIN" ] || { echo "未找到 cloudflared（$CF_BIN），请先执行 bash install.sh" >&2; exit 1; }
+case "$TUNNEL" in
+  none)
+    echo "（BRIDGE_TUNNEL=none，只监听本机）"
+    ;;
 
-  pkill -f 'cloudflared tunnel' 2>/dev/null || true
-  sleep 1
-  : > "$LOG_DIR/cf.log"
-  setsid nohup "$CF_BIN" tunnel --url "http://localhost:$PORT" --no-autoupdate \
-    > "$LOG_DIR/cf.log" 2>&1 </dev/null &
+  cloudflare)
+    CF_BIN="$BRIDGE_HOME_DIR/bin/cloudflared"
+    [ -x "$CF_BIN" ] || { echo "未找到 cloudflared（$CF_BIN），请先执行 bash install.sh，或改用 BRIDGE_TUNNEL=ngrok" >&2; exit 1; }
 
-  for _ in $(seq 1 30); do
-    PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG_DIR/cf.log" 2>/dev/null | head -1 || true)"
-    [ -n "$PUBLIC_URL" ] && break
-    sleep 2
-  done
+    pkill -f 'cloudflared tunnel' 2>/dev/null || true
+    sleep 1
+    : > "$LOG_DIR/cf.log"
+    setsid nohup "$CF_BIN" tunnel --url "http://localhost:$PORT" --no-autoupdate \
+      > "$LOG_DIR/cf.log" 2>&1 </dev/null &
 
-  if [ -z "$PUBLIC_URL" ]; then
-    echo "⚠ 隧道地址未取到，稍后查看 $LOG_DIR/cf.log" >&2
-  fi
-fi
+    for _ in $(seq 1 30); do
+      PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG_DIR/cf.log" 2>/dev/null | head -1 || true)"
+      [ -n "$PUBLIC_URL" ] && break
+      sleep 2
+    done
+
+    if [ -z "$PUBLIC_URL" ]; then
+      echo "⚠ 隧道地址未取到，稍后查看 $LOG_DIR/cf.log" >&2
+    fi
+    ;;
+
+  ngrok)
+    NG_BIN="$BRIDGE_HOME_DIR/bin/ngrok"
+    [ -x "$NG_BIN" ] || { echo "未找到 ngrok（$NG_BIN），请先执行 bash install.sh" >&2; exit 1; }
+
+    pkill -f 'ngrok http' 2>/dev/null || true
+    sleep 1
+    : > "$LOG_DIR/ng.log"
+    setsid nohup "$NG_BIN" http "$PORT" --log stdout --log-format logfmt \
+      > "$LOG_DIR/ng.log" 2>&1 </dev/null &
+
+    for _ in $(seq 1 30); do
+      # logfmt 成功行形如: ... msg="started tunnel" obj=tunnels ... url=https://xxxx.ngrok-free.app
+      PUBLIC_URL="$(grep -oE 'url=https://[a-z0-9.-]+' "$LOG_DIR/ng.log" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+      # 兜底：只认 ngrok 自有域名后缀，避免误抓日志里的 dashboard.ngrok.com
+      if [ -z "$PUBLIC_URL" ]; then
+        PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.ngrok(-free)?\.(app|dev|io|pizza|pro)' "$LOG_DIR/ng.log" 2>/dev/null | head -1 || true)"
+      fi
+      [ -n "$PUBLIC_URL" ] && break
+      # 鉴权类错误不会自愈，提前退出并给出线索
+      if grep -qE 'ERR_NGROK_[0-9]+' "$LOG_DIR/ng.log" 2>/dev/null; then break; fi
+      sleep 2
+    done
+
+    if [ -z "$PUBLIC_URL" ]; then
+      echo "⚠ 隧道地址未取到，ngrok 报错：" >&2
+      grep -E 'lvl=crit|^ERROR' "$LOG_DIR/ng.log" 2>/dev/null | head -3 >&2 || true
+      echo "  多数情况是缺 authtoken：$NG_BIN config add-authtoken <TOKEN>，或启动前 export NGROK_AUTHTOKEN=<TOKEN>" >&2
+      echo "  完整日志：$LOG_DIR/ng.log" >&2
+    fi
+    ;;
+esac
 
 # ---------- 输出 ----------
 echo
 echo "本地入口: $LOCAL_URL"
 if [ -n "$PUBLIC_URL" ]; then
   echo "公网入口: $PUBLIC_URL/mcp/$TOKEN"
+  echo "隧道类型: $TUNNEL"
 fi
 echo
 echo "客户端配置（把 url 换成上面的入口）:"
@@ -126,5 +171,5 @@ cat <<EOF
 }
 EOF
 echo
-echo "日志: $LOG_DIR/sg.log , $LOG_DIR/cf.log"
+echo "日志: $LOG_DIR/sg.log , $LOG_DIR/cf.log , $LOG_DIR/ng.log"
 echo "停止: bash $SCRIPT_DIR/stop.sh"

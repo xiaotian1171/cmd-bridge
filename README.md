@@ -1,8 +1,10 @@
 # cmd-bridge
 
-**把一台远程 Linux 机器的 shell，变成任何支持 MCP 的 AI 客户端可以直接调用的工具。**
+**把一台远程机器的 shell，变成任何支持 MCP 的 AI 客户端可以直接调用的工具。**
 
 不写服务端代码。三层全部使用现成组件拼装，5 分钟部署，一条命令启动，跑完就能从网页 AI 或任意 MCP 客户端操作那台机器。
+
+公网出口内置两种隧道：**cloudflared（默认，零配置）** 与 **ngrok（需免费账号）**，按机器网络情况二选一。
 
 ---
 
@@ -18,7 +20,9 @@ cmd-bridge 就是这层通道。它把本地 stdio 类型的 MCP 执行引擎（
 MCP 客户端（网页 AI / 桌面客户端 / 脚本）
         │  HTTPS + 路径 token
         ▼
-cloudflared quick tunnel        ← 公网入口，零配置
+公网隧道（二选一）
+  · cloudflared quick tunnel   ← 默认，免登录
+  · ngrok                      ← 需 authtoken，适合 Cloudflare 连不通的机器
         │  http://localhost:8000
         ▼
 supergateway（--stateful）       ← stdio ⇄ Streamable HTTP 转换
@@ -34,7 +38,7 @@ desktop-commander               ← 执行引擎，26 个工具
 
 | 层 | 组件 | 作用 | 安装方式 |
 | --- | --- | --- | --- |
-| 公网入口 | cloudflared | quick tunnel，免登录出公网地址 | `install.sh` 自动下载 |
+| 公网入口 | cloudflared / ngrok | 把本地端口暴露到公网 | `install.sh` 自动下载 |
 | 协议转换 | supergateway | stdio MCP → Streamable HTTP | npm 安装 |
 | 执行引擎 | desktop-commander | 提供 26 个终端/文件工具 | npm 安装 |
 | 可选代理 | filter-proxy.js | 工具白名单 + 调用拦截 | 仓库自带 |
@@ -45,7 +49,7 @@ desktop-commander               ← 执行引擎，26 个工具
 
 - Linux x86_64 / arm64（已在 Debian 系内核 6.x 实测），或 Windows 10/11、Windows Server 2016+（PowerShell 5.1+，脚本未在真机验证）
 - Node.js ≥ 18（实测 v24）
-- 能访问 npm 与 github.com
+- 能访问 npm、github.com、bin.equinox.io
 
 ### 2. 安装
 
@@ -65,24 +69,29 @@ cd cmd-bridge
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-装完后：
+两个隧道二进制各自独立安装，任一失败只告警、不阻断另一个：
 
-- MCP 组件在 `~/.bridge-npm`（Windows 为 `%USERPROFILE%\.bridge-npm`：supergateway、desktop-commander）
+- MCP 组件在 `~/.bridge-npm`（Windows 为 `%USERPROFILE%\.bridge-npm`）
 - cloudflared 在 `~/.bridge/bin/cloudflared`（Windows 为 `%USERPROFILE%\.bridge\bin\cloudflared.exe`）
-- 都可用环境变量改路径，见下方配置项
+- ngrok 在 `~/.bridge/bin/ngrok`（Windows 为 `%USERPROFILE%\.bridge\bin\ngrok.exe`）
+
+都可用环境变量改路径，见下方配置项。
 
 ### 3. 启动
 
 **Linux / macOS：**
 
 ```bash
-bash start.sh
+bash start.sh                      # 默认走 cloudflared
+BRIDGE_TUNNEL=ngrok bash start.sh  # 改走 ngrok
+BRIDGE_TUNNEL=none  bash start.sh  # 只监听本机
 ```
 
 **Windows（PowerShell）：**
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File start.ps1
+$env:BRIDGE_TUNNEL='ngrok'; powershell -ExecutionPolicy Bypass -File start.ps1
 ```
 
 首次运行会自动生成 32 位十六进制 token，保存在 `~/.bridge/token`，之后复用。启动完成后打印：
@@ -90,6 +99,7 @@ powershell -ExecutionPolicy Bypass -File start.ps1
 ```
 本地入口: http://localhost:8000/mcp/<TOKEN>
 公网入口: https://<随机域名>.trycloudflare.com/mcp/<TOKEN>
+隧道类型: cloudflare
 ```
 
 > 一定要用 `bash start.sh` 运行。脚本内部会 `pkill` 同名进程；若把脚本内容整段粘进 shell 执行，pkill 可能匹配到当前命令行把自己杀掉。
@@ -103,7 +113,7 @@ powershell -ExecutionPolicy Bypass -File start.ps1
   "mcpServers": {
     "cmd-bridge": {
       "type": "streamable-http",
-      "url": "https://<随机域名>.trycloudflare.com/mcp/<TOKEN>"
+      "url": "https://<随机域名>/mcp/<TOKEN>"
     }
   }
 }
@@ -116,7 +126,7 @@ powershell -ExecutionPolicy Bypass -File start.ps1
 ```bash
 python3 - <<'PY'
 import json, urllib.request
-url = "https://<随机域名>.trycloudflare.com/mcp/<TOKEN>"
+url = "https://<随机域名>/mcp/<TOKEN>"
 def post(body, sid=None):
     h = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
     if sid: h["Mcp-Session-Id"] = sid
@@ -150,61 +160,64 @@ PY
 | `BRIDGE_TOKEN` | 首次自动生成 | 路径 token，也是访问凭据 |
 | `BRIDGE_PORT` | `8000` | supergateway 监听端口 |
 | `BRIDGE_MODE` | `full` | `full` = 26 个工具全开；`safe` = 白名单 6 个终端工具 |
-| `BRIDGE_NO_TUNNEL` | `0` | 设为 `1` 只监听本地，不起 cloudflared |
+| `BRIDGE_TUNNEL` | `cloudflare` | 公网出口：`cloudflare` \| `ngrok` \| `none` |
+| `BRIDGE_NO_TUNNEL` | — | 旧参数，设为 `1` 等价于 `BRIDGE_TUNNEL=none` |
+| `NGROK_AUTHTOKEN` | — | `BRIDGE_TUNNEL=ngrok` 时使用，ngrok 自身也会读取该变量 |
 | `BRIDGE_NPM_PREFIX` | `~/.bridge-npm` | MCP 组件安装位置 |
-| `BRIDGE_HOME` | `~/.bridge` | token、日志、cloudflared 的存放位置 |
+| `BRIDGE_HOME` | `~/.bridge` | token、日志、隧道二进制的存放位置 |
 
-例：只在本机用、换端口、开白名单模式：
-
-```bash
-BRIDGE_NO_TUNNEL=1 BRIDGE_PORT=9000 BRIDGE_MODE=safe bash start.sh
-```
-
-### 停止
+例：换端口、开白名单模式、只在本机用：
 
 ```bash
-bash stop.sh                # Linux / macOS
-powershell -ExecutionPolicy Bypass -File stop.ps1   # Windows
+BRIDGE_TUNNEL=none BRIDGE_PORT=9000 BRIDGE_MODE=safe bash start.sh
 ```
 
-## 交互模型（用之前必须理解）
+### 隧道怎么选
 
-客户端发一条长命令不能同步等结果——30～60 秒就会被掐断。正确姿势是四拍：
+| | cloudflared quick tunnel（默认） | ngrok |
+| --- | --- | --- |
+| 账号 | 不需要 | 需注册免费账号并拿 authtoken |
+| 每次启动的域名 | 随机 `*.trycloudflare.com`，重启必换 | 随机 `*.ngrok-free.app`，重启必换 |
+| 适用场景 | 通用，开箱即用 | Cloudflare 出口被限制或连不通的机器 |
+| 已知限制 | 首次域名 DNS 传播可能需一两分钟 | 免费版同一账号同时只允许 1 个 agent 会话在线；浏览器直接访问会撞警告页（MCP 客户端不受影响） |
 
-1. `start_process` 启动命令，立刻拿到 PID 和首批输出；**超时不等于失败**，进程仍在后台跑。
-2. `read_process_output` 带 `offset` 增量续读，返回是否结束、退出码、还可读多少行。
-3. `interact_with_process` 给交互式进程写输入（如 REPL、需要确认的脚本）。
-4. `kill_process` / `force_terminate` 收尾。
+ngrok 首次配置（只需一次）：
 
-网页 AI 场景下，务必把"异步启动 + 轮询续读"写进提示词，否则模型会把超时当成失败反复重跑同一条命令。
-
-## 连接后的示例提示词
-
-把下面这段放进客户端的系统提示词 / 自定义指令里（网页 AI 在创建 MCP Connector 时通常有"指令"输入框），AI 就会按正确的节奏使用工具：
-
-```
-你通过名为 cmd-bridge 的 MCP 服务操作一台远程机器（Linux 是 bash，Windows 是 PowerShell，由桥所在端决定），只有它提供的工具可用。
-
-执行规则：
-1. 一切命令用 start_process 发起。它会立刻返回 PID 和首批输出；若提示进程仍在运行（Process is running），不要重试，进入第 2 步。
-2. 用 read_process_output 并传上次返回的 offset 参数继续读取，直到看到 "Process completed with exit code"。超时截断不代表失败，进程还在跑，继续轮询即可。
-3. 交互式程序（python REPL、需要 y/n 确认的脚本）用 interact_with_process 写入；不再需要的进程用 kill_process 或 force_terminate 清掉。
-4. 每条命令只做一件事，输出尽量精简（Linux 可加 2>&1 | tail -n 50；Windows 用 Select-Object -Last 50）。禁止启动会永久占住前台的命令（top、watch、无 -y 的交互安装器）；需要常驻服务时 Linux 用 nohup ... >log 2>&1 &，Windows 用 Start-Process。
-5. 对机器的任何破坏性操作（rm -rf / Remove-Item -Recurse、覆盖配置、改网络）先向我说明要做什么、影响什么，等我确认再执行。
+```bash
+~/.bridge/bin/ngrok config add-authtoken <TOKEN>
 ```
 
-上面这段是"通用模板"。也可以只写一句轻量版：
+也可以不落盘、每次启动前临时给：
 
+```bash
+export NGROK_AUTHTOKEN=<TOKEN>
+BRIDGE_TUNNEL=ngrok bash start.sh
 ```
-执行命令时用 start_process 启动、read_process_output 带 offset 轮询到退出码为止，
-超时不算失败；交互输入用 interact_with_process；危险操作先问我。（连接 Windows 端时命令写 PowerShell 语法）
-```
+
+## 排障
+
+| 现象 | 原因与处理 |
+| --- | --- |
+| `read_process_output` 报 `No session found for PID xxx` | supergateway 少了 `--stateful`，每个请求都会重开执行引擎实例，进程 session 丢失。本仓库脚本已内置。 |
+| 自定义客户端第二次请求返回 `400 Bad Request` | 有状态模式下必须回传首个响应头里的 `Mcp-Session-Id`，检查客户端是否把它丢了。 |
+| 启动后 stdout 全空、连接断开 | 命令里含 `pkill -f supergateway` 之类的自匹配串，把承载命令的 shell 自己杀了。放进脚本文件再执行。 |
+| 重启后旧公网地址失效 | 两种隧道的域名都随进程变化，去 `~/.bridge/logs/cf.log` 或 `ng.log` 取新地址。 |
+| ngrok 启动后取不到地址，日志有 `ERR_NGROK_4018` | 没配 authtoken。执行 `~/.bridge/bin/ngrok config add-authtoken <TOKEN>`，或启动前 `export NGROK_AUTHTOKEN=<TOKEN>`。 |
+| 另一台机器启动后，原来的 ngrok 隧道掉线 | ngrok 免费版同一账号只允许 1 个 agent 会话在线，先在那台机器上 `bash stop.sh`。 |
+| ngrok 报其他 `ERR_NGROK_xxxx` | `~/.bridge/logs/ng.log` 里有完整原因说明，按提示处理。 |
+| 桥能本地访问但公网连不通 | 先 `bash stop.sh` 再换一种隧道重试（`BRIDGE_TUNNEL=ngrok` 或 `cloudflare`），多见于云厂商到 Cloudflare / ngrok 其中一方的网络不通。 |
+| npm 安装后命令不存在 | npm 11 会拦 `postinstall`，可试 `npm rebuild -g --prefix <prefix> desktop-commander`。 |
+| Windows：PowerShell 提示"禁止运行脚本" | 用 `powershell -ExecutionPolicy Bypass -File xxx.ps1` 运行，仓库脚本都不改系统执行策略。 |
+| Windows：`npm install` 卡在 desktop-commander 的下载/编译 | 确认 Node 是 x64 官方构建；或在 `%USERPROFILE%\.bridge-npm` 下手动 `npm rebuild`。 |
+| Windows：cloudflared / ngrok 下载失败 | 手动从 [cloudflared releases](https://github.com/cloudflare/cloudflared/releases/latest) 取 `cloudflared-windows-amd64.exe`，或从 [bin.equinox.io](https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip) 取 ngrok，分别放到 `%USERPROFILE%\.bridge\bin\` 下。 |
+| Windows：stop.ps1 后端口仍被占用 | 有残留 node 进程，`Get-Process node` 看 PID 后手动 `Stop-Process -Id <pid> -Force`。 |
 
 ## 安全边界（必读）
 
 - **URL 里的 token 就是全部凭据**，且执行引擎通常以部署用户身份运行，等价于把这台机器的 shell 交出去。
 - 默认情况下**没有** header 校验、没有来源 IP 限制、没有命令黑名单、没有审计日志。
-- 公网隧道地址随 cloudflared 进程变化，但 token 不变；token 泄露后地址可能被扫到并滥用。
+- 公网隧道地址随隧道进程变化，但 token 不变；token 泄露后地址可能被扫到并滥用。
+- ngrok 免费版的隧道域名会被第三方扫描器高频扫描，且 ngrok 面板本身记录访问来源；敏感机器优先选 cloudflared，或干脆 `BRIDGE_TUNNEL=none` 只走内网。
 - 建议：仅自用；`~/.bridge/token` 权限设 600；定期轮换 token；不要在群里、截图里、公开仓库里贴带 token 的完整 URL；更稳妥的做法是把部署机器本身做成隔离环境（容器/独立账号）。
 
 要收敛风险，可用 `BRIDGE_MODE=safe` 只暴露终端类工具——注意这挡不住 `cat` 读文件，它是"减少误触面"，不是安全边界。
@@ -213,8 +226,8 @@ powershell -ExecutionPolicy Bypass -File stop.ps1   # Windows
 
 ```
 cmd-bridge/
-├── install.sh       # 安装 MCP 组件与 cloudflared（幂等）——Linux / macOS
-├── start.sh         # 启动桥（含公网隧道）——Linux / macOS
+├── install.sh       # 安装 MCP 组件与两种隧道二进制（幂等）——Linux / macOS
+├── start.sh         # 启动桥（含公网隧道，默认 cloudflared）——Linux / macOS
 ├── stop.sh          # 停止——Linux / macOS
 ├── install.ps1      # 同 install.sh——Windows（PowerShell 5.1+）
 ├── start.ps1        # 同 start.sh——Windows
@@ -224,27 +237,14 @@ cmd-bridge/
 └── README.md
 ```
 
-运行期产物都在 `~/.bridge/`（Windows 为 `%USERPROFILE%\.bridge`）：`token`、`logs/sg.log`、`logs/cf.log`、`bin/cloudflared(.exe)`。
-
-## 排障
-
-| 现象 | 原因与处理 |
-| --- | --- |
-| `read_process_output` 报 `No session found for PID xxx` | supergateway 少了 `--stateful`，每个请求都会重开执行引擎实例，进程 session 丢失。本仓库脚本已内置。 |
-| 自定义客户端第二次请求返回 `400 Bad Request` | 有状态模式下必须回传首个响应头里的 `Mcp-Session-Id`，检查客户端是否把它丢了。 |
-| 启动后 stdout 全空、连接断开 | 命令里含 `pkill -f supergateway` 之类的自匹配串，把承载命令的 shell 自己杀了。放进脚本文件再执行。 |
-| 重启后旧公网地址失效 | quick tunnel 的域名随进程变化，去 `~/.bridge/logs/cf.log` 取新地址。 |
-| npm 安装后命令不存在 | npm 11 会拦 `postinstall`，可试 `npm rebuild -g --prefix <prefix> desktop-commander`。 |
-| Windows：PowerShell 提示"禁止运行脚本" | 用 `powershell -ExecutionPolicy Bypass -File xxx.ps1` 运行，仓库脚本都不改系统执行策略。 |
-| Windows：`npm install` 卡在 desktop-commander 的下载/编译 | 确认 Node 是 x64 官方构建；或在 `%USERPROFILE%\.bridge-npm` 下手动 `npm rebuild`。 |
-| Windows：cloudflared 下载失败 | 手动从 [cloudflared releases](https://github.com/cloudflare/cloudflared/releases/latest) 下载 `cloudflared-windows-amd64.exe`，放到 `%USERPROFILE%\.bridge\bin\cloudflared.exe`。 |
-| Windows：stop.ps1 后端口仍被占用 | 有残留 node 进程，`Get-Process node` 看 PID 后手动 `Stop-Process -Id <pid> -Force`。 |
+运行期产物都在 `~/.bridge/`（Windows 为 `%USERPROFILE%\.bridge`）：`token`、`logs/sg.log`、`logs/cf.log`、`logs/ng.log`、`bin/cloudflared(.exe)`、`bin/ngrok(.exe)`。
 
 ## 已验证环境
 
 - Debian 系 Linux x86_64，96 核 / 499 GB / 11 TB，Node v24.19.0，npm 11.17.0；另在 Alpine/musl（Node v24.20.0）环境跑通
 - supergateway + desktop-commander 0.2.50，协议版本 2024-11-05
-- 已验证：工具列表拉取、真实命令执行（含中文输出）、长驻进程增量轮询、交互写输入、通过公网隧道回环调用
+- ngrok v3.39.11（Linux x86_64）：下载源、`http` 与 `config` 子命令参数已实测；未配 authtoken 时的报错形态已实测
+- 已验证：工具列表拉取、真实命令执行（含中文输出）、长驻进程增量轮询、交互写输入、通过 cloudflared 公网隧道回环调用
 - **Windows 端（install.ps1 / start.ps1 / stop.ps1 / check.ps1）未在真机验证**，桌面执行引擎等组件均声明支持 Windows，理论上可直接跑；遇到问题请开 issue 附日志
 
 ## 说明
