@@ -75,8 +75,7 @@ fi
 
 # BRIDGE_MODE=admin：清空 desktop-commander 的命令黑名单（sudo/apt 等全部放行），权限全开。
 # 桥的 token 就是全部凭据，此模式下持有 URL 的人可执行任意命令（含 root），仅在隔离
-# 环境（容器/一次性虚拟机/独立低权账号）或明确知晓风险时使用。若需免 sudo 操作
-# docker，另执行一次：sudo usermod -aG docker "$USER"
+# 环境（容器/一次性虚拟机/独立低权账号）或明确知晓风险时使用。
 if [ "$MODE" = "admin" ]; then
   python3 - "$HOME" <<'PY' || true
 import json, os, sys
