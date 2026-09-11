@@ -9,9 +9,11 @@
 # 可用环境变量：
 #   BRIDGE_TOKEN       路径 token，不传则复用 ~/.bridge/token，首次自动生成
 #   BRIDGE_PORT        supergateway 端口，默认 8000
-#   BRIDGE_MODE        full（默认，26 工具全开）| safe（白名单 6 个终端工具）
+#   BRIDGE_MODE        full（默认，26 工具全开）| admin（清黑名单=权限全开）| safe（白名单 6 个终端工具）
 #   BRIDGE_TUNNEL      cloudflare（默认）| ngrok | none
 #   BRIDGE_NO_TUNNEL   旧参数，设为 1 等价于 BRIDGE_TUNNEL=none
+#   BRIDGE_TLS         1 = 直连模式（BRIDGE_TUNNEL=none）强制 HTTPS：supergateway 退到
+#                      本机内部端口，由 tls-proxy.cjs 用自签证书在 BRIDGE_PORT 提供 HTTPS
 #   NGROK_AUTHTOKEN    BRIDGE_TUNNEL=ngrok 时用；ngrok 自身也会读取该变量
 #   BRIDGE_NPM_PREFIX  MCP 组件安装位置，默认 ~/.bridge-npm
 #   BRIDGE_HOME        token/日志存放位置，默认 ~/.bridge
@@ -35,10 +37,36 @@ case "$TUNNEL" in
   cloudflare|ngrok|none) ;;
   *) echo "错误: BRIDGE_TUNNEL 只能是 cloudflare | ngrok | none（当前: $TUNNEL）" >&2; exit 1 ;;
 esac
+TLS="${BRIDGE_TLS:-0}"
+case "$TLS" in
+  0|1) ;;
+  *) echo "错误: BRIDGE_TLS 只能是 0 或 1（当前: $TLS）" >&2; exit 1 ;;
+esac
 
 mkdir -p "$LOG_DIR"
+
+# BRIDGE_TLS：仅直连模式生效；隧道出口本身是 HTTPS，无需重复 TLS
+TLS_ON=0
+if [ "$TLS" = "1" ]; then
+  if [ "$TUNNEL" != "none" ]; then
+    echo "⚠ BRIDGE_TLS=1 仅在 BRIDGE_TUNNEL=none 时生效（$TUNNEL 隧道出口已是 HTTPS），本次忽略" >&2
+  elif ! command -v openssl >/dev/null 2>&1; then
+    echo "⚠ 未找到 openssl，无法生成自签证书，本次忽略 BRIDGE_TLS" >&2
+  else
+    TLS_DIR="$BRIDGE_HOME_DIR/tls"
+    mkdir -p "$TLS_DIR"
+    if [ ! -f "$TLS_DIR/cert.pem" ] || [ ! -f "$TLS_DIR/key.pem" ]; then
+      openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "$TLS_DIR/key.pem" -out "$TLS_DIR/cert.pem" \
+        -days 3650 -subj "/CN=cmd-bridge" >/dev/null 2>&1
+      chmod 600 "$TLS_DIR/key.pem"
+    fi
+    TLS_ON=1
+  fi
+fi
 printf '%s' "$TUNNEL" > "$BRIDGE_HOME_DIR/tunnel_mode"
 printf '%s' "$MODE" > "$BRIDGE_HOME_DIR/run_mode"
+printf '%s' "$TLS_ON" > "$BRIDGE_HOME_DIR/run_tls"
 
 # ---------- 前置检查 ----------
 [ -x "$NPM_PREFIX/bin/supergateway" ] || { echo "未安装 supergateway，请先执行 bash install.sh" >&2; exit 1; }
@@ -106,11 +134,13 @@ sleep 1
 SG_ENTRY="$NPM_PREFIX/lib/node_modules/supergateway/dist/index.js"
 SG_LAUNCH=("$NPM_PREFIX/bin/supergateway")
 [ -f "$SG_ENTRY" ] && SG_LAUNCH=("$NODE_BIN" -r "$SCRIPT_DIR/sg-hook.cjs" "$SG_ENTRY")
+SG_PORT="$PORT"
+[ "$TLS_ON" = "1" ] && SG_PORT=$((PORT+1))
 setsid nohup "${SG_LAUNCH[@]}" \
   --stateful --cors \
   --stdio "$ENGINE" \
   --streamableHttpPath "/mcp/$TOKEN" \
-  --port "$PORT" --outputTransport streamableHttp \
+  --port "$SG_PORT" --outputTransport streamableHttp \
   > "$LOG_DIR/sg.log" 2>&1 </dev/null &
 
 for _ in $(seq 1 15); do
@@ -124,7 +154,26 @@ if ! grep -q 'Listening' "$LOG_DIR/sg.log" 2>/dev/null; then
   exit 1
 fi
 
-LOCAL_URL="http://localhost:$PORT/mcp/$TOKEN"
+if [ "$TLS_ON" = "1" ]; then
+  pkill -f 'tls-proxy.cjs' 2>/dev/null || true
+  sleep 1
+  : > "$LOG_DIR/tls.log"
+  setsid nohup "$NODE_BIN" "$SCRIPT_DIR/tls-proxy.cjs" "$PORT" "$SG_PORT" \
+    "$BRIDGE_HOME_DIR/tls/cert.pem" "$BRIDGE_HOME_DIR/tls/key.pem" \
+    > "$LOG_DIR/tls.log" 2>&1 </dev/null &
+  for _ in $(seq 1 10); do
+    grep -q 'listening' "$LOG_DIR/tls.log" 2>/dev/null && break
+    sleep 1
+  done
+  if ! grep -q 'listening' "$LOG_DIR/tls.log" 2>/dev/null; then
+    echo "tls-proxy 启动失败，日志：$LOG_DIR/tls.log" >&2
+    tail -n 10 "$LOG_DIR/tls.log" >&2
+    exit 1
+  fi
+  LOCAL_URL="https://localhost:$PORT/mcp/$TOKEN"
+else
+  LOCAL_URL="http://localhost:$PORT/mcp/$TOKEN"
+fi
 echo "✔ 桥已就绪（$ENGINE_DESC）"
 
 # ---------- 启动公网隧道 ----------
@@ -190,6 +239,11 @@ esac
 # ---------- 输出 ----------
 echo
 echo "本地入口: $LOCAL_URL"
+if [ "$TLS_ON" = "1" ]; then
+  echo "强制 HTTPS: 已启用（supergateway 实际监听 127.0.0.1:$SG_PORT，对外仅 $PORT 的 HTTPS）"
+  echo "  自签证书: $BRIDGE_HOME_DIR/tls/cert.pem；严格校验证书的客户端（如 ChatGPT 连接器）会拒绝，"
+  echo "  此类场景请改走 BRIDGE_TUNNEL=ngrok/cloudflare，或自备正规证书反代"
+fi
 if [ -n "$PUBLIC_URL" ]; then
   echo "公网入口: $PUBLIC_URL/mcp/$TOKEN"
   echo "隧道类型: $TUNNEL"
@@ -201,11 +255,11 @@ cat <<EOF
   "mcpServers": {
     "cmd-bridge": {
       "type": "streamable-http",
-      "url": "${PUBLIC_URL:-http://localhost:$PORT}/mcp/$TOKEN"
+      "url": "${PUBLIC_URL:-${LOCAL_URL%/mcp/*}}/mcp/$TOKEN"
     }
   }
 }
 EOF
 echo
-echo "日志: $LOG_DIR/sg.log , $LOG_DIR/cf.log , $LOG_DIR/ng.log"
+echo "日志: $LOG_DIR/sg.log , $LOG_DIR/tls.log , $LOG_DIR/cf.log , $LOG_DIR/ng.log"
 echo "停止: bash $SCRIPT_DIR/stop.sh"

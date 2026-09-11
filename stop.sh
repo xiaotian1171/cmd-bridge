@@ -9,6 +9,9 @@ echo "停止 supergateway / desktop-commander..."
 pkill -f 'supergateway' 2>/dev/null && echo "已停止" || echo "未在运行"
 pkill -f 'desktop-commander' 2>/dev/null && echo "已停止" || echo "未在运行"
 
+echo "停止 tls-proxy..."
+pkill -f 'tls-proxy.cjs' 2>/dev/null && echo "已停止" || echo "未在运行"
+
 echo "停止 cloudflared tunnel..."
 pkill -f 'cloudflared tunnel' 2>/dev/null && echo "已停止" || echo "未在运行"
 

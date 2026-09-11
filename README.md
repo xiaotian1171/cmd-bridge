@@ -85,6 +85,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 bash start.sh                      # 默认走 cloudflared
 BRIDGE_TUNNEL=ngrok bash start.sh  # 改走 ngrok
 BRIDGE_TUNNEL=none  bash start.sh  # 只监听本机
+BRIDGE_TUNNEL=none BRIDGE_TLS=1 bash start.sh  # 直连 + 强制 HTTPS（自签证书）
 ```
 
 **Windows（PowerShell）：**
@@ -162,6 +163,7 @@ PY
 | `BRIDGE_MODE` | `full` | `full` = 26 个工具全开（默认安全黑名单）；`admin` = 全开且清空黑名单（sudo/apt 等不再拦截，权限全开）；`safe` = 白名单 6 个终端工具 |
 | `BRIDGE_TUNNEL` | `cloudflare` | 公网出口：`cloudflare` \| `ngrok` \| `none` |
 | `BRIDGE_NO_TUNNEL` | — | 旧参数，设为 `1` 等价于 `BRIDGE_TUNNEL=none` |
+| `BRIDGE_TLS` | `0` | `1` = 直连模式（`BRIDGE_TUNNEL=none`）强制 HTTPS：supergateway 退到本机内部端口，`tls-proxy.cjs` 用自签证书在 `BRIDGE_PORT` 提供 HTTPS，HTTP 不出本机。隧道模式下忽略（出口已是 HTTPS） |
 | `NGROK_AUTHTOKEN` | — | `BRIDGE_TUNNEL=ngrok` 时使用，ngrok 自身也会读取该变量 |
 | `BRIDGE_NPM_PREFIX` | `~/.bridge-npm` | MCP 组件安装位置 |
 | `BRIDGE_HOME` | `~/.bridge` | token、日志、隧道二进制的存放位置 |
@@ -249,6 +251,7 @@ cmd-bridge/
 ├── keepalive.sh     # 可选进程守护：桥意外退出 5 秒内自动拉起——Linux / macOS
 ├── sg-hook.cjs      # supergateway 崩溃护栏（start.sh 自动通过 node -r 挂载，勿单独运行）
 ├── chatgpt-compat.cjs # ChatGPT 兼容层：剥离 Apps SDK widget 元数据（full 模式自动挂载）
+├── tls-proxy.cjs      # 直连模式强制 HTTPS 的 TLS 终端代理（BRIDGE_TLS=1 自动挂载）
 ├── install.ps1      # 同 install.sh——Windows（PowerShell 5.1+）
 ├── start.ps1        # 同 start.sh——Windows
 ├── stop.ps1         # 停止——Windows
@@ -265,6 +268,7 @@ cmd-bridge/
 - supergateway 3.4.3 + desktop-commander 0.2.50，协议版本 2024-11-05
 - Ubuntu 22.x x86_64（Oracle Cloud，2 核 / 954 MB）：`BRIDGE_TUNNEL=none` 公网直连与 ngrok https 出口实测；supergateway 客户端断开崩溃 bug 已复现，`sg-hook.cjs` 护栏修复后断开 90 秒存活验证
 - 同机实测 `BRIDGE_MODE=admin`：黑名单清空，`sudo` 与 `sudo docker` 经桥执行正常
+- 同机实测 `BRIDGE_TUNNEL=none BRIDGE_TLS=1`：8000 直连自签 HTTPS，跳过证书校验的客户端全链路通过
 - ngrok v3.39.11（Linux x86_64）：下载源、`http` 与 `config` 子命令参数已实测；未配 authtoken 时的 `ERR_NGROK_4018` 报错形态已实测；取地址逻辑用真实日志验证（认 logfmt 的 `url=` 字段，不会误抓日志里的 `dashboard.ngrok.com`）
 - ngrok 免费版实测：MCP 客户端直接 POST 即可，不需要 `ngrok-skip-browser-warning` 头；浏览器警告页只影响用浏览器手动打开域名
 - 已验证：工具列表拉取（26 个）、真实命令执行（含中文输出）、长驻进程增量轮询、交互写输入、通过 cloudflared 与 ngrok 两种公网隧道从外网回环调用（`start_process` 真实执行 + `read_file` 读回）

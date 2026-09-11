@@ -21,7 +21,8 @@ while true; do
     echo "$(date '+%F %T') bridge down, restarting" >> "$LOG"
     TUN="$(cat "$BRIDGE_HOME_DIR/tunnel_mode" 2>/dev/null || echo none)"
     MOD="$(cat "$BRIDGE_HOME_DIR/run_mode" 2>/dev/null || echo full)"
-    BRIDGE_TUNNEL="$TUN" BRIDGE_MODE="$MOD" nohup bash "$SCRIPT_DIR/start.sh" >> "$LOG" 2>&1
+    TLSF="$(cat "$BRIDGE_HOME_DIR/run_tls" 2>/dev/null || echo 0)"
+    BRIDGE_TUNNEL="$TUN" BRIDGE_MODE="$MOD" BRIDGE_TLS="$TLSF" nohup bash "$SCRIPT_DIR/start.sh" >> "$LOG" 2>&1
   fi
   sleep 5
 done
