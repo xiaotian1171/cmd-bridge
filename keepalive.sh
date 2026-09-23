@@ -17,7 +17,8 @@ mkdir -p "$BRIDGE_HOME_DIR"
 
 while true; do
   if ! pgrep -f 'supergateway' >/dev/null 2>&1 \
-     || ! ss -tln 2>/dev/null | grep -q ":${PORT} "; then
+     || ! ss -tln 2>/dev/null | grep -q ":${PORT} " \
+     || [ ! -S "${BRIDGE_HOME_DIR}/dc-hub.sock" ]; then
     echo "$(date '+%F %T') bridge down, restarting" >> "$LOG"
     TUN="$(cat "$BRIDGE_HOME_DIR/tunnel_mode" 2>/dev/null || echo none)"
     MOD="$(cat "$BRIDGE_HOME_DIR/run_mode" 2>/dev/null || echo full)"

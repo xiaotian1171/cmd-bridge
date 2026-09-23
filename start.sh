@@ -131,7 +131,27 @@ fi
 # ---------- 启动协议转换层 ----------
 pkill -f 'supergateway' 2>/dev/null || true
 pkill -f 'desktop-commander' 2>/dev/null || true
+pkill -f 'dc-hu[b]' 2>/dev/null || true
 sleep 1
+
+# ---------- 启动单例引擎中枢 ----------
+# 每个 MCP session 不再各起一份引擎，全部复用中枢持有的同一份；
+# session 侧只跑轻量转发进程（dc-hub-client.cjs），
+# 避免客户端不复用 session 时引擎数随调用量增长撑爆小内存容器。
+export DC_HUB_CMD="$NODE_BIN $SCRIPT_DIR/dc-hub.cjs -- sh -c \"$ENGINE\""
+HUB_SOCK="$BRIDGE_HOME_DIR/dc-hub.sock"
+rm -f "$HUB_SOCK"
+setsid nohup "$NODE_BIN" "$SCRIPT_DIR/dc-hub.cjs" -- sh -c "$ENGINE" \
+  > "$LOG_DIR/hub.log" 2>&1 </dev/null &
+for _ in $(seq 1 20); do
+  [ -S "$HUB_SOCK" ] && break
+  sleep 1
+done
+if [ ! -S "$HUB_SOCK" ]; then
+  echo "引擎中枢启动失败，最后 20 行日志：" >&2
+  tail -n 20 "$LOG_DIR/hub.log" >&2
+  exit 1
+fi
 
 # supergateway 3.4.3 有已知崩溃 bug：客户端断开连接会触发未处理异常直接杀进程。
 # 存在 dist/index.js 时用 `node -r` 预加载 sg-hook.cjs 护栏；否则退回 bin 启动（无护栏）。
@@ -142,7 +162,7 @@ SG_PORT="$PORT"
 [ "$TLS_ON" = "1" ] && SG_PORT=$((PORT+1))
 setsid nohup "${SG_LAUNCH[@]}" \
   --stateful --cors --sessionTimeout 60000 \
-  --stdio "$ENGINE" \
+  --stdio "$NODE_BIN $SCRIPT_DIR/dc-hub-client.cjs" \
   --streamableHttpPath "/mcp/$TOKEN" \
   --port "$SG_PORT" --outputTransport streamableHttp \
   > "$LOG_DIR/sg.log" 2>&1 </dev/null &
