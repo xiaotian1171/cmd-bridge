@@ -29,8 +29,12 @@ PORT="${BRIDGE_PORT:-8000}"
 MODE="${BRIDGE_MODE:-full}"
 TUNNEL="${BRIDGE_TUNNEL:-cloudflare}"
 if [ "${BRIDGE_NO_TUNNEL:-0}" = "1" ]; then TUNNEL=none; fi
+# CF token/域名：环境变量优先，没传时回退读 ~/.bridge 里的存档。
+# 缺了回退会让 keepalive 重启（不带环境变量）丢掉命名隧道、退回 trycloudflare 临时域名。
 CF_TOKEN="${BRIDGE_CF_TOKEN:-}"
+[ -n "$CF_TOKEN" ] || CF_TOKEN="$(cat "$BRIDGE_HOME_DIR/cf_token" 2>/dev/null || true)"
 CF_DOMAIN="${BRIDGE_CF_DOMAIN:-}"
+[ -n "$CF_DOMAIN" ] || CF_DOMAIN="$(cat "$BRIDGE_HOME_DIR/cf_domain" 2>/dev/null || true)"
 case "$MODE" in
   full|admin|safe) ;;
   *) echo "错误: BRIDGE_MODE 只能是 full | admin | safe（当前: $MODE）" >&2; exit 1 ;;
@@ -211,7 +215,9 @@ case "$TUNNEL" in
     CF_BIN="$BRIDGE_HOME_DIR/bin/cloudflared"
     [ -x "$CF_BIN" ] || { echo "未找到 cloudflared（$CF_BIN），请先执行 bash install.sh，或改用 BRIDGE_TUNNEL=ngrok" >&2; exit 1; }
 
-    pkill -f 'cloudflared tunnel' 2>/dev/null || true
+    # 注意：实际命令行是 `cloudflared --no-autoupdate tunnel run --token ...`，
+    # 两个词不相邻，写 'cloudflared tunnel' 会永远匹配不到、旧实例越积越多。
+    pkill -f 'cloudflar[e]d' 2>/dev/null || true
     sleep 1
     : > "$LOG_DIR/cf.log"
 
