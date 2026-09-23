@@ -141,7 +141,7 @@ SG_LAUNCH=("$NPM_PREFIX/bin/supergateway")
 SG_PORT="$PORT"
 [ "$TLS_ON" = "1" ] && SG_PORT=$((PORT+1))
 setsid nohup "${SG_LAUNCH[@]}" \
-  --stateful --cors --sessionTimeout 300000 \
+  --stateful --cors --sessionTimeout 60000 \
   --stdio "$ENGINE" \
   --streamableHttpPath "/mcp/$TOKEN" \
   --port "$SG_PORT" --outputTransport streamableHttp \
