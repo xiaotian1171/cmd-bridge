@@ -17,6 +17,15 @@
 #   NGROK_AUTHTOKEN    BRIDGE_TUNNEL=ngrok 时用；ngrok 自身也会读取该变量
 #   BRIDGE_NPM_PREFIX  MCP 组件安装位置，默认 ~/.bridge-npm
 #   BRIDGE_HOME        token/日志存放位置，默认 ~/.bridge
+#   BRIDGE_SESSION_TIMEOUT supergateway session 空闲回收窗口（毫秒），默认 7200000（2 小时）。
+#                      每个 session 会常驻一个 dc-hub-client 进程，窗口越长堆积越多。
+#                      实测（supergateway 3.4.3）：过期 session 再被使用时返回 HTTP 400 与
+#                      JSON-RPC 错误码 -32000（不是规范建议的 404/-32001）；能否无感恢复
+#                      取决于客户端是否自动重新 initialize（ChatGPT 连接器、Operit 等真实
+#                      客户端尚未在离线环境验证），所以默认保持保守值；
+#                      确认客户端能自动恢复后再下调（例如 1800000 = 30 分钟）。
+#   BRIDGE_KILL_LEGACY 1 = 允许对「改造前启动、environ 里没有 BRIDGE_OWNER 的旧实例」
+#                      回退到旧的全量 pkill 语义（默认 0，只操作本桥自己的进程）。
 
 set -euo pipefail
 
@@ -24,6 +33,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NPM_PREFIX="${BRIDGE_NPM_PREFIX:-$HOME/.bridge-npm}"
 BRIDGE_HOME_DIR="${BRIDGE_HOME:-$HOME/.bridge}"
 LOG_DIR="$BRIDGE_HOME_DIR/logs"
+
+# 进程身份标记：本次启动拉起的所有子进程都会带上 BRIDGE_OWNER=<BRIDGE_HOME>，
+# start.sh / stop.sh / keepalive.sh 只操作带这个标记的进程，避免误杀同机其它
+# supergateway / cloudflared / ngrok / desktop-commander。详见 proc-lib.sh。
+export BRIDGE_OWNER="$BRIDGE_HOME_DIR"
+# 让中枢与 session 侧转发进程都用同一个 socket（自定义 BRIDGE_HOME 时也要一致，
+# 否则 dc-hub 会落到 $HOME/.bridge/dc-hub.sock，start.sh/keepalive 却等另一个）
+export DC_HUB_SOCK="${BRIDGE_HOME_DIR}/dc-hub.sock"
+# shellcheck source=proc-lib.sh
+. "$SCRIPT_DIR/proc-lib.sh"
+
+# 手动停止进行中（stop.sh 会先立这个标志）：本次不启动。
+# 没有这道闸门时，守护进程可能在用户停桥的同时「发现桥不在」并把它拉回来。
+STOP_FLAG="$BRIDGE_HOME_DIR/stopping"
+if [ -f "$STOP_FLAG" ]; then
+  echo "检测到 $STOP_FLAG（手动停止进行中），本次不启动"
+  exit 0
+fi
 
 PORT="${BRIDGE_PORT:-8000}"
 MODE="${BRIDGE_MODE:-full}"
@@ -48,6 +75,13 @@ case "$TLS" in
   0|1) ;;
   *) echo "错误: BRIDGE_TLS 只能是 0 或 1（当前: $TLS）" >&2; exit 1 ;;
 esac
+# session 空闲回收窗口；默认 2 小时（保守值，理由见文件头注释）
+SESSION_TIMEOUT="${BRIDGE_SESSION_TIMEOUT:-7200000}"
+case "$SESSION_TIMEOUT" in
+  ''|*[!0-9]*) echo "错误: BRIDGE_SESSION_TIMEOUT 必须是正整数毫秒（当前: $SESSION_TIMEOUT）" >&2; exit 1 ;;
+esac
+[ "$SESSION_TIMEOUT" -ge 1000 ] || { echo "错误: BRIDGE_SESSION_TIMEOUT 太小（当前: $SESSION_TIMEOUT）" >&2; exit 1; }
+LEGACY_KILL="${BRIDGE_KILL_LEGACY:-0}"
 
 mkdir -p "$LOG_DIR"
 
@@ -132,18 +166,51 @@ PY
   ENGINE_DESC="desktop-commander（26 个工具全开，黑名单已清空 = 权限全开）"
 fi
 
-# ---------- 启动协议转换层 ----------
-pkill -f 'supergateway' 2>/dev/null || true
-pkill -f 'desktop-commander' 2>/dev/null || true
-pkill -f 'dc-hu[b]' 2>/dev/null || true
+# ---------- 清理上一次的实例 ----------
+# 停「本桥进程」= 新版 owned（environ 有 BRIDGE_OWNER）∪ 旧实例（凭本桥独占资源识别：
+# 本桥端口 / DC_HUB_SOCK / dc-hub.sock / 命令行里的本桥 home / 本桥网关的祖先守护）。
+# 同机另一套 supergateway / cloudflared / ngrok / desktop-commander 不会被误停；
+# 只有显式 BRIDGE_KILL_LEGACY=1 才回退到旧的全量 pkill 语义（默认关闭）。
+export BRIDGE_PORT="$PORT"
+SD_RE="$(printf '%s' "$SCRIPT_DIR" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+NPM_RE="$(printf '%s' "$NPM_PREFIX" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+SG_PAT="${NPM_RE}/lib/node_modules/supergateway|${NPM_RE}/bin/supergateway"
+ENGINE_PAT="${NPM_RE}/bin/desktop-commander|${SD_RE}/(chatgpt-compat|filter-proxy)\\.js"
+BRIDGE_HOME_RE="$(printf '%s' "$BRIDGE_HOME_DIR" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+CF_RE="${BRIDGE_HOME_RE}/bin/cloudflared"
+NG_RE="${BRIDGE_HOME_RE}/bin/ngrok"
+# 旧守护自己没有任何 home 标记，靠「是本桥网关/中枢的祖先」被识别，必须先停它
+scoped_kill "${SD_RE}/keepalive\\.sh" "" TERM >/dev/null || true
 sleep 1
+for _pid in $(scoped_pids "${SD_RE}/dc-hub-client\.cjs" "$SG_PAT"); do kill -TERM "$_pid" 2>/dev/null || true; done
+scoped_kill "${SD_RE}/dc-hub\.cjs" "" TERM >/dev/null || true
+scoped_kill "$ENGINE_PAT" "" TERM >/dev/null || true
+scoped_kill "$SG_PAT" "" TERM >/dev/null || true
+if [ "$LEGACY_KILL" = "1" ]; then
+  pkill -f "$SG_PAT" 2>/dev/null || true
+  pkill -f "$ENGINE_PAT" 2>/dev/null || true
+  pkill -f "${SD_RE}/dc-hub\.cjs" 2>/dev/null || true
+fi
+pidfile_clear hub; pidfile_clear sg; pidfile_clear engine
+# 清掉上一次运行遗留的 session 活动标记，避免守护按过期的活动时间误判空闲
+rm -f "$BRIDGE_HOME_DIR/activity"/*.act 2>/dev/null || true
+sleep 1
+# 还赖着的（例如不响应 TERM 的）再补一记
+for pid in $(scoped_pids "${SD_RE}/dc-hub\.cjs") $(scoped_pids "$ENGINE_PAT") $(scoped_pids "$SG_PAT") $(scoped_pids "${SD_RE}/dc-hub-client\.cjs" "$SG_PAT"); do
+  pid_alive_real "$pid" && { kill -KILL "$pid" 2>/dev/null || true; echo "已强杀: $pid"; }
+done
 
 # ---------- 启动单例引擎中枢 ----------
 # 每个 MCP session 不再各起一份引擎，全部复用中枢持有的同一份；
 # session 侧只跑轻量转发进程（dc-hub-client.cjs），
 # 避免客户端不复用 session 时引擎数随调用量增长撑爆小内存容器。
 export DC_HUB_CMD="$NODE_BIN $SCRIPT_DIR/dc-hub.cjs -- sh -c \"$ENGINE\""
-HUB_SOCK="$BRIDGE_HOME_DIR/dc-hub.sock"
+# 同一件事的参数化版本：dc-hub-client 自动拉起中枢时按 argv 直接 spawn，
+# 不经过 sh，避免多出一层「命令行里含 dc-hub.cjs」的包装进程影响进程身份判定。
+export DC_HUB_NODE="$NODE_BIN"
+export DC_HUB_SCRIPT="$SCRIPT_DIR/dc-hub.cjs"
+export DC_HUB_ENGINE="$ENGINE"
+HUB_SOCK="$DC_HUB_SOCK"
 rm -f "$HUB_SOCK"
 setsid nohup "$NODE_BIN" "$SCRIPT_DIR/dc-hub.cjs" -- sh -c "$ENGINE" \
   > "$LOG_DIR/hub.log" 2>&1 </dev/null &
@@ -156,6 +223,8 @@ if [ ! -S "$HUB_SOCK" ]; then
   tail -n 20 "$LOG_DIR/hub.log" >&2
   exit 1
 fi
+HUB_PID="$(record_role_pid hub "${SD_RE}/dc-hub\\.cjs" || true)"
+[ -n "${HUB_PID:-}" ] && echo "引擎中枢 pid=$HUB_PID"
 
 # supergateway 3.4.3 有已知崩溃 bug：客户端断开连接会触发未处理异常直接杀进程。
 # 存在 dist/index.js 时用 `node -r` 预加载 sg-hook.cjs 护栏；否则退回 bin 启动（无护栏）。
@@ -165,7 +234,8 @@ SG_LAUNCH=("$NPM_PREFIX/bin/supergateway")
 SG_PORT="$PORT"
 [ "$TLS_ON" = "1" ] && SG_PORT=$((PORT+1))
 setsid nohup "${SG_LAUNCH[@]}" \
-  --stateful --cors --sessionTimeout 86400000 \
+  --stateful --cors --sessionTimeout "$SESSION_TIMEOUT" \
+  --healthEndpoint /healthz \
   --stdio "$NODE_BIN $SCRIPT_DIR/dc-hub-client.cjs" \
   --streamableHttpPath "/mcp/$TOKEN" \
   --port "$SG_PORT" --outputTransport streamableHttp \
@@ -181,9 +251,11 @@ if ! grep -q 'Listening' "$LOG_DIR/sg.log" 2>/dev/null; then
   tail -n 20 "$LOG_DIR/sg.log" >&2
   exit 1
 fi
+SG_PID="$(record_role_pid sg "$SG_PAT" || true)"
+[ -n "${SG_PID:-}" ] && echo "supergateway pid=$SG_PID (sessionTimeout=${SESSION_TIMEOUT}ms)"
 
 if [ "$TLS_ON" = "1" ]; then
-  pkill -f 'tls-proxy.cjs' 2>/dev/null || true
+  bridge_kill "${SD_RE}/tls-proxy\\.cjs" TERM "$LEGACY_KILL" || true
   sleep 1
   : > "$LOG_DIR/tls.log"
   setsid nohup "$NODE_BIN" "$SCRIPT_DIR/tls-proxy.cjs" "$PORT" "$SG_PORT" \
@@ -217,7 +289,10 @@ case "$TUNNEL" in
 
     # 注意：实际命令行是 `cloudflared --no-autoupdate tunnel run --token ...`，
     # 两个词不相邻，写 'cloudflared tunnel' 会永远匹配不到、旧实例越积越多。
-    pkill -f 'cloudflar[e]d' 2>/dev/null || true
+    # 但也不能用裸 'cloudflared' 全量匹配（会杀同机别人的隧道），因此限定成
+    # 「本桥 BRIDGE_HOME 下安装的 cloudflared 二进制」这条命令，或 legacy 模式。
+    CF_PAT="${CF_RE}|${BRIDGE_HOME_RE}/bin/cloudflared"
+    bridge_kill "$CF_PAT" TERM "$LEGACY_KILL" || true
     sleep 1
     : > "$LOG_DIR/cf.log"
 
@@ -225,6 +300,7 @@ case "$TUNNEL" in
       # 自有域名模式：connector 用 token 接入，域名/路由在 CF 后台（remotely-managed）配置
       setsid nohup "$CF_BIN" --no-autoupdate tunnel run --token "$CF_TOKEN" \
         > "$LOG_DIR/cf.log" 2>&1 </dev/null &
+      record_role_pid cf "$CF_PAT" >/dev/null || true
       for _ in $(seq 1 30); do
         grep -q 'Registered tunnel connection' "$LOG_DIR/cf.log" 2>/dev/null && break
         if grep -qE 'lvl=(error|crit|fatal)' "$LOG_DIR/cf.log" 2>/dev/null; then break; fi
@@ -244,6 +320,7 @@ case "$TUNNEL" in
       # 快速通道：trycloudflare 临时域名，免账号免域名，地址随机
       setsid nohup "$CF_BIN" tunnel --url "http://localhost:$PORT" --no-autoupdate \
         > "$LOG_DIR/cf.log" 2>&1 </dev/null &
+      record_role_pid cf "$CF_PAT" >/dev/null || true
 
       for _ in $(seq 1 30); do
         PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG_DIR/cf.log" 2>/dev/null | head -1 || true)"
@@ -261,11 +338,12 @@ case "$TUNNEL" in
     NG_BIN="$BRIDGE_HOME_DIR/bin/ngrok"
     [ -x "$NG_BIN" ] || { echo "未找到 ngrok（$NG_BIN），请先执行 bash install.sh" >&2; exit 1; }
 
-    pkill -f 'ngrok http' 2>/dev/null || true
+    bridge_kill "$NG_RE" TERM "$LEGACY_KILL" || true
     sleep 1
     : > "$LOG_DIR/ng.log"
     setsid nohup "$NG_BIN" http "$PORT" --log stdout --log-format logfmt \
       > "$LOG_DIR/ng.log" 2>&1 </dev/null &
+    record_role_pid ng "$NG_RE" >/dev/null || true
 
     for _ in $(seq 1 30); do
       # logfmt 成功行形如: ... msg="started tunnel" obj=tunnels ... url=https://xxxx.ngrok-free.app
