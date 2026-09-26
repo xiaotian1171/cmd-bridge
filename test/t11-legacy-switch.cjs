@@ -67,16 +67,30 @@ function portListening(port) {
   } catch (_) { return false; }
 }
 
+// 旧版代码的基准：proc-lib.sh 是本次修复才引入的文件，它的「新增提交」的父提交
+// 就是最后一份「带 dc-hub 引擎但还没有进程作用域化逻辑」的代码。不能用 HEAD，
+// 因为修复提交之后 HEAD 已经变成新版，装出来的就不是旧版了。
+function legacyRef() {
+  try {
+    const add = execFileSync("git", ["log", "--format=%H", "-1", "--diff-filter=A", "--", "proc-lib.sh"],
+      { cwd: H.COPY, encoding: "utf8" }).trim();
+    if (add) return `${add}^`;
+  } catch (_) { /* 落到 HEAD 兜底 */ }
+  return "HEAD";
+}
+
 function writeLegacyDir() {
   fs.rmSync(LEGDIR, { recursive: true, force: true });
   fs.mkdirSync(LEGDIR, { recursive: true });
+  const ref = legacyRef();
   const files = ["start.sh", "stop.sh", "keepalive.sh", "dc-hub.cjs", "dc-hub-client.cjs",
                  "sg-hook.cjs", "chatgpt-compat.cjs", "tls-proxy.cjs", "engine-guard.sh",
                  "filter-proxy.js"];
   for (const f of files) {
-    const body = execFileSync("git", ["show", `HEAD:${f}`], { cwd: H.COPY, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 });
+    const body = execFileSync("git", ["show", `${ref}:${f}`], { cwd: H.COPY, encoding: "utf8", maxBuffer: 20 * 1024 * 1024 });
     fs.writeFileSync(path.join(LEGDIR, f), body);
   }
+  return ref;
 }
 
 function upgradeInPlace() {
@@ -99,12 +113,12 @@ const readToken = (home) => fs.readFileSync(path.join(home, "token"), "utf8").tr
   H.resetHome(HOME_B, "tok-t11b");
   fs.rmSync(HOME_DECOY, { recursive: true, force: true });
   fs.mkdirSync(path.join(HOME_DECOY, "logs"), { recursive: true });
-  writeLegacyDir();
-  info(`旧版代码已写入 ${LEGDIR}`);
+  const legRef = writeLegacyDir();
+  info(`旧版代码（${legRef}）已写入 ${LEGDIR}`);
 
   // 旧桥 A + 旧守护
   const aStart = await H.run(path.join(LEGDIR, "start.sh"), [], envFor(HOME_A, PORT_A));
-  ok(aStart.code === 0 && /已就绪/.test(aStart.out), "旧版 A 启动成功（HEAD 代码，environ 无 BRIDGE_OWNER）", `rc=${aStart.code}`);
+  ok(aStart.code === 0 && /已就绪/.test(aStart.out), `旧版 A 启动成功（${legRef} 代码，environ 无 BRIDGE_OWNER）`, `rc=${aStart.code}`);
   const aKeep = spawn("bash", [path.join(LEGDIR, "keepalive.sh")], { env: envFor(HOME_A, PORT_A), detached: true, stdio: "ignore" });
   aKeep.unref(); children.push(aKeep);
   ok(await waitFor(() => scopedPids(HOME_A, PORT_A, KEEPALIVE_PAT).length > 0, { timeout: 8000, label: "旧守护出现" }),

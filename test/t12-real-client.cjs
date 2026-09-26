@@ -87,8 +87,10 @@ const sgLog = () => { try { return fs.readFileSync(path.join(HOME_T, "logs", "sg
   const k2 = await mp(["call", "tka2.read_file"], "ka2.json");
   ok(k1.code === 0 && k2.code === 0, "两个 keep-alive 客户端各自建立会话并调用成功");
   await sleep(1000);
+  // 第二个客户端的转发进程可能要晚一点才被网关拉起来，等到两台同时在（上限 1 下的前提）
+  const bothOk = await waitFor(() => clients().length === 2, { timeout: 10000, label: "两台转发进程同时在" });
   const both = clients();
-  ok(both.length === 2, "两台客户端的会话转发进程同时在（超出上限 1）", `pids=${both}`);
+  ok(bothOk, "两台客户端的会话转发进程同时在（超出上限 1）", `pids=${both}`);
   const heldStream = /GET request for existing session/.test(sgLog());
   ok(heldStream, "证据：客户端持有 SSE GET 流（所以只靠 sessionTimeout 回收不到它）");
   info("等 keepalive 按空闲顺序修剪...");
@@ -103,7 +105,8 @@ const sgLog = () => { try { return fs.readFileSync(path.join(HOME_T, "logs", "sg
   ok(/Restarting|No valid session ID|Streamable HTTP error/.test(kb.out + kb.err),
     "证据：客户端第一次请求先被旧会话拒绝（400/-32000），随后自动重建会话重试成功",
     short(kb.out + " " + kb.err, 240));
-  ok(clients().length === 2, "重建后该客户端重新持有会话", `pids=${clients()}`);
+  const rebOk = await waitFor(() => clients().length === 2, { timeout: 10000, label: "重建后重新持有会话" });
+  ok(rebOk, "重建后该客户端重新持有会话", `pids=${clients()}`);
   await mp(["daemon", "stop"], "ka1.json");
   await mp(["daemon", "stop"], "ka2.json");
   await sleep(1000);

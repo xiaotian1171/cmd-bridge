@@ -24,6 +24,8 @@
 #                      取决于客户端是否自动重新 initialize（ChatGPT 连接器、Operit 等真实
 #                      客户端尚未在离线环境验证），所以默认保持保守值；
 #                      确认客户端能自动恢复后再下调（例如 1800000 = 30 分钟）。
+#                      没传环境变量时回退读 ~/.bridge/session_timeout 存档，这样 keepalive
+#                      重启（只带隧道/模式类变量）也不会把窗口悄悄变回默认值。
 #   BRIDGE_KILL_LEGACY 1 = 允许对「改造前启动、environ 里没有 BRIDGE_OWNER 的旧实例」
 #                      回退到旧的全量 pkill 语义（默认 0，只操作本桥自己的进程）。
 
@@ -75,8 +77,13 @@ case "$TLS" in
   0|1) ;;
   *) echo "错误: BRIDGE_TLS 只能是 0 或 1（当前: $TLS）" >&2; exit 1 ;;
 esac
-# session 空闲回收窗口；默认 2 小时（保守值，理由见文件头注释）
-SESSION_TIMEOUT="${BRIDGE_SESSION_TIMEOUT:-7200000}"
+# session 空闲回收窗口；环境变量优先，没传时回退读 ~/.bridge 存档（keepalive 重启不带
+# 环境变量时也能保持一致），最后才用默认 2 小时（保守值，理由见文件头注释）
+SESSION_TIMEOUT="${BRIDGE_SESSION_TIMEOUT:-}"
+if [ -z "$SESSION_TIMEOUT" ] && [ -r "$BRIDGE_HOME_DIR/session_timeout" ]; then
+  SESSION_TIMEOUT="$(tr -d ' \t\n' < "$BRIDGE_HOME_DIR/session_timeout")"
+fi
+SESSION_TIMEOUT="${SESSION_TIMEOUT:-7200000}"
 case "$SESSION_TIMEOUT" in
   ''|*[!0-9]*) echo "错误: BRIDGE_SESSION_TIMEOUT 必须是正整数毫秒（当前: $SESSION_TIMEOUT）" >&2; exit 1 ;;
 esac
@@ -109,6 +116,7 @@ printf '%s' "$MODE" > "$BRIDGE_HOME_DIR/run_mode"
 printf '%s' "$TLS_ON" > "$BRIDGE_HOME_DIR/run_tls"
 printf '%s' "$CF_TOKEN" > "$BRIDGE_HOME_DIR/cf_token"
 printf '%s' "$CF_DOMAIN" > "$BRIDGE_HOME_DIR/cf_domain"
+printf '%s' "$SESSION_TIMEOUT" > "$BRIDGE_HOME_DIR/session_timeout"
 
 # ---------- 前置检查 ----------
 [ -x "$NPM_PREFIX/bin/supergateway" ] || { echo "未安装 supergateway，请先执行 bash install.sh" >&2; exit 1; }
