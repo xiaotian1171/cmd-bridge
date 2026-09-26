@@ -25,8 +25,14 @@ MCP 客户端（网页 AI / 桌面客户端 / 脚本）
   · ngrok                      ← 需 authtoken，适合 Cloudflare 连不通的机器
         │  http://localhost:8000
         ▼
-supergateway（--stateful）       ← stdio ⇄ Streamable HTTP 转换
+supergateway（--stateful）       ← stdio ⇄ Streamable HTTP 转换，每 session 一个
         │  stdio
+        ▼
+dc-hub-client.cjs               ← 轻量转发进程：stdin/stdout ⇄ Unix socket
+        │  unix socket（默认 ~/.bridge/dc-hub.sock）
+        ▼
+dc-hub.cjs                      ← 单例中枢：全机只跑一份执行引擎
+        │
         ▼
 desktop-commander               ← 执行引擎，26 个工具
         │
@@ -34,12 +40,16 @@ desktop-commander               ← 执行引擎，26 个工具
 宿主 shell（真实机器权限）
 ```
 
+**为什么要多一层 dc-hub。** supergateway 的每个 MCP session 会独占一份执行引擎进程。客户端不复用 session 时（网页 AI 每次对话新建一个），引擎会持续堆积，小内存机器很快 OOM。dc-hub 让全机只保留一份引擎，多 session 走同一个 socket 复用，`initialize` 由中枢本地应答——这是长期挂机场景下的关键设计，不是可选的优化。
+
 可选：在 supergateway 与执行引擎之间插入 `filter-proxy.js`，把工具面收敛到 6 个终端工具（`BRIDGE_MODE=safe`）。它只是收敛工具面，**不是沙箱**。
 
 | 层 | 组件 | 作用 | 安装方式 |
 | --- | --- | --- | --- |
 | 公网入口 | cloudflared / ngrok | 把本地端口暴露到公网 | `install.sh` 自动下载 |
 | 协议转换 | supergateway | stdio MCP → Streamable HTTP | npm 安装 |
+| 会话转发 | dc-hub-client.cjs | 每个 session 一个，连中枢 socket | 仓库自带 |
+| 引擎中枢 | dc-hub.cjs | 单例，复用同一份执行引擎 | 仓库自带 |
 | 执行引擎 | desktop-commander | 提供 26 个终端/文件工具 | npm 安装 |
 | 可选代理 | filter-proxy.js | 工具白名单 + 调用拦截 | 仓库自带 |
 
@@ -47,7 +57,7 @@ desktop-commander               ← 执行引擎，26 个工具
 
 ### 1. 环境要求
 
-- Linux x86_64 / arm64（已在 Debian 系内核 6.x 实测），或 Windows 10/11、Windows Server 2016+（PowerShell 5.1+，脚本未在真机验证）
+- Linux x86_64 / arm64（已在 Debian 系内核 6.x 实测），或 Windows 10/11、Windows Server 2016+（PowerShell 5.1+）
 - Node.js ≥ 18（实测 v24）
 - 能访问 npm、github.com、bin.equinox.io
 
@@ -104,7 +114,7 @@ $env:BRIDGE_TUNNEL='ngrok'; powershell -ExecutionPolicy Bypass -File start.ps1
 隧道类型: cloudflare
 ```
 
-> 一定要用 `bash start.sh` 运行。脚本内部会 `pkill` 同名进程；若把脚本内容整段粘进 shell 执行，pkill 可能匹配到当前命令行把自己杀掉。
+> 一定要用 `bash start.sh` 运行。脚本内部会按进程身份清理旧实例；若把脚本内容整段粘进 shell 执行，匹配串可能命中当前命令行把自己杀掉。
 
 ### 4. 接入客户端
 
@@ -165,11 +175,24 @@ PY
 | `BRIDGE_TUNNEL` | `cloudflare` | 公网出口：`cloudflare` \| `ngrok` \| `none` |
 | `BRIDGE_NO_TUNNEL` | — | 旧参数，设为 `1` 等价于 `BRIDGE_TUNNEL=none` |
 | `BRIDGE_TLS` | `0` | `1` = 直连模式（`BRIDGE_TUNNEL=none`）强制 HTTPS：supergateway 退到本机内部端口，`tls-proxy.cjs` 用自签证书在 `BRIDGE_PORT` 提供 HTTPS，HTTP 不出本机。隧道模式下忽略（出口已是 HTTPS） |
+| `BRIDGE_SESSION_TIMEOUT` | `7200000`（2 小时） | 空闲 session 的回收窗口，毫秒。超时后 supergateway 释放该 session 及其转发进程，客户端下次调用会新建一个 |
 | `BRIDGE_CF_TOKEN` | — | `BRIDGE_TUNNEL=cloudflare` 时设为 CF tunnel token（`eyJ...`）→ 走自己域名（域名在 CF 后台 Public Hostname 绑定，Service 填 `http://localhost:$BRIDGE_PORT`）；留空走 trycloudflare 快速通道 |
 | `BRIDGE_CF_DOMAIN` | — | 可选，配合 `BRIDGE_CF_TOKEN`，填 CF 绑定的域名（如 `mcp.example.eu.org`），仅用于启动回显完整地址 |
 | `NGROK_AUTHTOKEN` | — | `BRIDGE_TUNNEL=ngrok` 时使用，ngrok 自身也会读取该变量 |
 | `BRIDGE_NPM_PREFIX` | `~/.bridge-npm` | MCP 组件安装位置 |
-| `BRIDGE_HOME` | `~/.bridge` | token、日志、隧道二进制的存放位置 |
+| `BRIDGE_HOME` | `~/.bridge` | token、日志、隧道二进制、socket 的存放位置 |
+| `BRIDGE_KILL_LEGACY` | `0` | 旧版本兜底：设为 `1` 时退回到"按命令行子串全量清理"的老语义（可能误杀同机其它桥）。默认只清理能确认属于本桥的进程，不要为省事打开它 |
+
+### 会话空闲窗口怎么设
+
+窗口越长，闲置 session 及其转发进程堆得越多；越短，客户端越容易撞上"会话被回收"，需要重建一次（客户端侧表现为失败一次、再试成功）。
+
+设置方式有两种，效果一样：
+
+- 环境变量：`BRIDGE_SESSION_TIMEOUT=1800000 bash start.sh`
+- 存档文件：`printf '%s' 1800000 > ~/.bridge/session_timeout`
+
+启动时脚本会把最终生效值写回 `~/.bridge/session_timeout`。**顺序是：环境变量 > 存档文件 > 默认 2 小时。** 这一步的意义在于：`keepalive.sh` 自动拉起桥时不会带这些环境变量，靠存档才能保持一致，否则重启会把窗口悄悄变回默认值。
 
 例：换端口、开白名单模式、只在本机用：
 
@@ -206,17 +229,28 @@ export NGROK_AUTHTOKEN=<TOKEN>
 BRIDGE_TUNNEL=ngrok bash start.sh
 ```
 
-### 进程守护（可选）
+## 进程守护（可选）
 
 supergateway 3.4.3 有一个已知 bug：MCP 客户端断开连接时会产生未处理异常并使进程退出（表现为桥突然失联，`~/.bridge/logs/sg.log` 尾部有异常栈）。本仓库已内置修复：`start.sh` 检测到 `dist/index.js` 时会用 `node -r sg-hook.cjs` 预加载异常护栏，这类异常只记录（`[sg-hook]` 前缀）不再杀进程，一个客户端断开不影响其他人继续使用。
 
 如需"桥挂了自动拉起"，另起一个守护进程（每 5 秒检查进程与端口，按 `~/.bridge/tunnel_mode` 里记录的上次隧道模式重启）：
 
 ```bash
-nohup bash keepalive.sh >/dev/null 2>&1 &
+setsid nohup bash keepalive.sh >/dev/null 2>&1 &
 ```
 
-`bash stop.sh` 会一并停掉守护；手动停守护：`pkill -f cmd-bridge/keepalive.sh`。
+守护同时负责 session 侧的资源上限：转发进程数超过 `BRIDGE_KEEPALIVE_CLIENT_MAX` 时按最老的修剪到 `BRIDGE_KEEPALIVE_CLIENT_TARGET`，避免长时间挂机后进程堆积。可调项：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `BRIDGE_KEEPALIVE_COOLDOWN` | `15` | 两次重启尝试之间至少间隔的秒数 |
+| `BRIDGE_KEEPALIVE_CLIENT_MAX` | `60` | dc-hub-client 进程上限，超过即修剪 |
+| `BRIDGE_KEEPALIVE_CLIENT_TARGET` | `20` | 修剪后的目标进程数 |
+| `BRIDGE_KEEPALIVE_PRUNE_STRIKES` | `2` | 连续几轮仍超限后改为重启整桥 |
+
+另附 `engine-guard.sh`：独立运行的引擎数量护栏（`MAX_ENGINES` 默认 4，超限杀最老的），适合只跑引擎、不含 supergateway 的场景或额外兜底。
+
+**关于停止。** `bash stop.sh` 只操作"能确认属于本桥"的进程，依据是进程身份标记：`start.sh` 会给它拉起的每一个子进程打上 `BRIDGE_OWNER=<BRIDGE_HOME>`，停止时按标记 + socket/端口/环境变量三路证据交叉确认，因此同一台机器上跑第二套桥不会被误停。若你的守护是用 `nohup bash keepalive.sh` 这种方式在标记生效前启动的旧进程，`stop.sh` 无法判定归属，会打印警告并要求人工确认，不会直接杀。
 
 ## 排障
 
@@ -224,7 +258,9 @@ nohup bash keepalive.sh >/dev/null 2>&1 &
 | --- | --- |
 | `read_process_output` 报 `No session found for PID xxx` | supergateway 少了 `--stateful`，每个请求都会重开执行引擎实例，进程 session 丢失。本仓库脚本已内置。 |
 | 自定义客户端第二次请求返回 `400 Bad Request` | 有状态模式下必须回传首个响应头里的 `Mcp-Session-Id`，检查客户端是否把它丢了。 |
-| 桥突然失联，`~/.bridge/logs/sg.log` 尾部有 `[sg-hook]` 异常记录 | supergateway 3.4.3 已知 bug：客户端断开连接时未处理异常会杀掉整个进程。本仓库 `start.sh` 已自动挂护栏（`sg-hook.cjs`），异常只记日志不再崩；也可加 `keepalive.sh` 守护自动拉起（见下文"进程守护"）。 |
+| 隔一段时间后客户端第一次调用失败、第二次成功 | 空闲 session 被 `BRIDGE_SESSION_TIMEOUT` 回收（或桥重启过），旧 session id 已失效，客户端重建即可。想减少重建就把窗口调大。 |
+| 桥突然失联，`~/.bridge/logs/sg.log` 尾部有 `[sg-hook]` 异常记录 | supergateway 3.4.3 已知 bug：客户端断开连接时未处理异常会杀掉整个进程。本仓库 `start.sh` 已自动挂护栏（`sg-hook.cjs`），异常只记日志不再崩；也可加 `keepalive.sh` 守护自动拉起（见上文）。 |
+| 客户端报 `400/-32000`，日志里 session 已不存在 | 桥重启过，旧 session 不会自动续接，必须由客户端重新创建。 |
 | ChatGPT 创建连接器报 Something went wrong | desktop-commander 0.2.50 给部分工具带了 OpenAI Apps SDK 的 widget 元数据（`_meta`），ChatGPT 会转去读 widget 资源导致创建失败。仓库已内置 `chatgpt-compat.cjs` 兼容层并由 `start.sh` 自动挂载（full 模式），无需额外配置。 |
 | 启动后 stdout 全空、连接断开 | 命令里含 `pkill -f supergateway` 之类的自匹配串，把承载命令的 shell 自己杀了。放进脚本文件再执行。 |
 | 重启后旧公网地址失效 | 两种隧道的域名都随进程变化，去 `~/.bridge/logs/cf.log` 或 `ng.log` 取新地址。 |
@@ -232,11 +268,13 @@ nohup bash keepalive.sh >/dev/null 2>&1 &
 | 另一台机器启动后，原来的 ngrok 隧道掉线 | ngrok 免费版同一账号只允许 1 个 agent 会话在线，先在那台机器上 `bash stop.sh`。 |
 | ngrok 报其他 `ERR_NGROK_xxxx` | `~/.bridge/logs/ng.log` 里有完整原因说明，按提示处理。 |
 | 桥能本地访问但公网连不通 | 先 `bash stop.sh` 再换一种隧道重试（`BRIDGE_TUNNEL=ngrok` 或 `cloudflare`），多见于云厂商到 Cloudflare / ngrok 其中一方的网络不通。 |
+| 命令执行报 `EPIPE` / 中途断流 | 转发进程被上限修剪或会话被回收。把 `BRIDGE_KEEPALIVE_CLIENT_MAX` 与 `BRIDGE_SESSION_TIMEOUT` 调大，或让客户端复用 session。 |
 | npm 安装后命令不存在 | npm 11 会拦 `postinstall`，可试 `npm rebuild -g --prefix <prefix> desktop-commander`。 |
 | Windows：PowerShell 提示"禁止运行脚本" | 用 `powershell -ExecutionPolicy Bypass -File xxx.ps1` 运行，仓库脚本都不改系统执行策略。 |
 | Windows：`npm install` 卡在 desktop-commander 的下载/编译 | 确认 Node 是 x64 官方构建；或在 `%USERPROFILE%\.bridge-npm` 下手动 `npm rebuild`。 |
 | Windows：cloudflared / ngrok 下载失败 | 手动从 [cloudflared releases](https://github.com/cloudflare/cloudflared/releases/latest) 取 `cloudflared-windows-amd64.exe`，或从 [bin.equinox.io](https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip) 取 ngrok，分别放到 `%USERPROFILE%\.bridge\bin\` 下。 |
 | Windows：stop.ps1 后端口仍被占用 | 有残留 node 进程，`Get-Process node` 看 PID 后手动 `Stop-Process -Id <pid> -Force`。 |
+| stop.sh 提示"无法判定归属的守护进程" | 见上文"关于停止"：改造前用 `nohup` 启动的旧守护没有身份标记，按提示人工确认后处理。 |
 
 ## 安全边界（必读）
 
@@ -254,34 +292,42 @@ nohup bash keepalive.sh >/dev/null 2>&1 &
 
 ```
 cmd-bridge/
-├── install.sh       # 安装 MCP 组件与两种隧道二进制（幂等）——Linux / macOS
-├── start.sh         # 启动桥（含公网隧道，默认 cloudflared）——Linux / macOS
-├── stop.sh          # 停止（含 keepalive 守护）——Linux / macOS
-├── keepalive.sh     # 可选进程守护：桥意外退出 5 秒内自动拉起——Linux / macOS
-├── sg-hook.cjs      # supergateway 崩溃护栏（start.sh 自动通过 node -r 挂载，勿单独运行）
+├── install.sh        # 安装 MCP 组件与两种隧道二进制（幂等）——Linux / macOS
+├── start.sh          # 启动桥（含公网隧道，默认 cloudflared）——Linux / macOS
+├── stop.sh           # 停止（含守护），按进程身份只清理本桥——Linux / macOS
+├── keepalive.sh      # 可选守护：桥意外退出自动拉起 + 转发进程上限修剪——Linux / macOS
+├── proc-lib.sh       # 进程身份与作用域工具库（被上面三个脚本 source）
+├── dc-hub.cjs        # 单例执行引擎中枢
+├── dc-hub-client.cjs # 每 session 一个的转发进程（stdio ⇄ unix socket）
+├── sg-hook.cjs       # supergateway 崩溃护栏（start.sh 自动通过 node -r 挂载，勿单独运行）
 ├── chatgpt-compat.cjs # ChatGPT 兼容层：剥离 Apps SDK widget 元数据（full 模式自动挂载）
 ├── tls-proxy.cjs      # 直连模式强制 HTTPS 的 TLS 终端代理（BRIDGE_TLS=1 自动挂载）
-├── install.ps1      # 同 install.sh——Windows（PowerShell 5.1+）
-├── start.ps1        # 同 start.sh——Windows
-├── stop.ps1         # 停止——Windows
-├── check.ps1        # 环境与进程检查——Windows
-├── filter-proxy.js  # 可选白名单代理（BRIDGE_MODE=safe 时启用，两端通用）
-└── README.md
+├── engine-guard.sh   # 可选：引擎数量护栏（独立运行）
+├── filter-proxy.js   # 可选白名单代理（BRIDGE_MODE=safe 时启用，两端通用）
+├── install.ps1       # 同 install.sh——Windows（PowerShell 5.1+）
+├── start.ps1         # 同 start.sh——Windows
+├── stop.ps1          # 停止——Windows
+├── check.ps1         # 环境与进程检查——Windows
+├── README.md
+└── test/             # 无外部依赖的回归测试（bash test/run-suite.sh）
 ```
 
-运行期产物都在 `~/.bridge/`（Windows 为 `%USERPROFILE%\.bridge`）：`token`、`logs/sg.log`、`logs/cf.log`、`logs/ng.log`、`bin/cloudflared(.exe)`、`bin/ngrok(.exe)`。
+运行期产物都在 `~/.bridge/`（Windows 为 `%USERPROFILE%\.bridge`）：`token`、`session_timeout`、`dc-hub.sock`、`logs/sg.log`、`logs/cf.log`、`logs/ng.log`、`bin/cloudflared(.exe)`、`bin/ngrok(.exe)`。
 
-## 已验证环境
+## 测试
 
-- Debian 系 Linux x86_64，96 核 / 499 GB / 11 TB，Node v24.19.0，npm 11.17.0；另在 Alpine/musl（Node v24.20.0）环境跑通
-- supergateway 3.4.3 + desktop-commander 0.2.50，协议版本 2024-11-05
-- Ubuntu 22.x x86_64（Oracle Cloud，2 核 / 954 MB）：`BRIDGE_TUNNEL=none` 公网直连与 ngrok https 出口实测；supergateway 客户端断开崩溃 bug 已复现，`sg-hook.cjs` 护栏修复后断开 90 秒存活验证
-- 同机实测 `BRIDGE_MODE=admin`：黑名单清空，`sudo` 与 `sudo docker` 经桥执行正常
-- 同机实测 `BRIDGE_TUNNEL=none BRIDGE_TLS=1`：8000 直连自签 HTTPS，跳过证书校验的客户端全链路通过
-- ngrok v3.39.11（Linux x86_64）：下载源、`http` 与 `config` 子命令参数已实测；未配 authtoken 时的 `ERR_NGROK_4018` 报错形态已实测；取地址逻辑用真实日志验证（认 logfmt 的 `url=` 字段，不会误抓日志里的 `dashboard.ngrok.com`）
-- ngrok 免费版实测：MCP 客户端直接 POST 即可，不需要 `ngrok-skip-browser-warning` 头；浏览器警告页只影响用浏览器手动打开域名
-- 已验证：工具列表拉取（26 个）、真实命令执行（含中文输出）、长驻进程增量轮询、交互写输入、通过 cloudflared 与 ngrok 两种公网隧道从外网回环调用（`start_process` 真实执行 + `read_file` 读回）
-- **Windows 端（install.ps1 / start.ps1 / stop.ps1 / check.ps1）未在真机验证**，桌面执行引擎等组件均声明支持 Windows，理论上可直接跑；遇到问题请开 issue 附日志
+`test/` 下是一套不依赖真实客户端的回归测试，覆盖会话过期、转发进程上限、进程作用域（不会误杀同机其它桥）、MCP 端到端链路、首次切换旧实例、以及用一个真实 MCP 客户端跑完整交互：
+
+```bash
+bash test/run-suite.sh
+```
+
+## 兼容性
+
+- 主线在 Debian 系 Linux x86_64 上开发与实测；glibc 与 musl（Alpine）两种环境均跑通过
+- 组件版本：supergateway 3.4.3 + desktop-commander 0.2.50，MCP 协议版本 2024-11-05
+- 公网出口：cloudflared quick tunnel 与自有域名、ngrok（v3，含免费版）实测可用；ngrok 免费版的会话数限制与浏览器警告页见上文
+- **Windows 脚本（install.ps1 / start.ps1 / stop.ps1 / check.ps1）未在真机验证**，组件本身均声明支持 Windows，理论上可直接跑；遇到问题请开 issue 附日志
 
 ## 说明
 
