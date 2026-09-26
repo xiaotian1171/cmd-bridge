@@ -7,3 +7,7 @@ logs/
 node_modules/
 .DS_Store
 .env
+
+# 内部核对/工作文档（不入开源仓库）
+REPORT.md
+REVIEW.diff
