@@ -40,6 +40,21 @@ HUB_SOCK="${BRIDGE_HOME_DIR}/dc-hub.sock"
 ACT_DIR="$(dirname "$HUB_SOCK")/activity"
 NODE_BIN="$(command -v node 2>/dev/null || echo node)"
 
+# 进程身份标记 + 中枢 socket：这两条必须以「exec 时的环境」存在，stop.sh 的
+# scoped_pids 才能认出守护自己。
+# 坑：/proc/<pid>/environ 只反映 exec 那一刻的环境，脚本内部 export 不会出现在
+# 守护进程自己的 environ 里（它拉起的子进程反而正常，因为子进程是带着 export
+# 后的环境 exec 的）。生产上用 `setsid nohup bash keepalive.sh` 启动时环境里没有
+# BRIDGE_*，不重新 exec 的话这个守护在 scoped_pids 里既不算 owned、也没有旧实例
+# 证据（cmdline 是脚本目录而不是 BRIDGE_HOME），stop.sh 会漏掉它，留下一个停不掉
+# 的守护去和下一次 start.sh 抢重启。这里主动用带标记的环境重新 exec 一次自己。
+if [ "${BRIDGE_OWNER:-}" != "$BRIDGE_HOME_DIR" ] || [ "${DC_HUB_SOCK:-}" != "$HUB_SOCK" ]; then
+  export BRIDGE_OWNER="$BRIDGE_HOME_DIR"
+  export DC_HUB_SOCK="$HUB_SOCK"
+  SELF="${BASH_SOURCE[0]:-}"
+  [ -n "$SELF" ] || SELF="$SCRIPT_DIR/keepalive.sh"
+  exec bash "$SELF" "$@"
+fi
 export BRIDGE_OWNER="$BRIDGE_HOME_DIR"
 export DC_HUB_SOCK="$HUB_SOCK"
 # shellcheck source=proc-lib.sh

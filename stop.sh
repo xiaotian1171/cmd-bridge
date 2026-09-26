@@ -81,6 +81,18 @@ while [ "$waited" -lt 12 ]; do
   waited=$((waited + 1))
 done
 stop_role keepalive "$KEEPALIVE_PAT"
+# 首切提醒：改造前启动的守护既没有 BRIDGE_OWNER，也没有任何指向本桥的环境变量
+# （它是用 `setsid nohup bash keepalive.sh` 起的，环境里只有默认值），而它既不监听
+# 端口也不持有 sock，cmdline 里也只有脚本目录，所以「本桥独占资源」这条路认不出它。
+# 这种情况下它会被漏掉，而它每 5s 就会把桥重新拉起来——首切时必须人工停掉它。
+# 这里只提示、不动作：真正属于同机另一套桥（只是一起用同一份脚本目录）的守护
+# 不能误杀。
+for p in $(unowned_pids "$KEEPALIVE_PAT"); do
+  pid_refs_other_bridge "$p" && continue
+  echo "  警告: 进程 $p 命令行匹配本桥守护脚本，但既无 BRIDGE_OWNER、也无指向本桥的环境变量"
+  echo "        无法判定归属（可能是改造前启动的旧守护，也可能是同机另一套桥复用同一目录）"
+  echo "        请人工确认：ps -o pid,lstart,cmd -p $p ；确认是本桥的则 kill $p 后再继续"
+done
 sleep 1
 
 echo "停止 supergateway..."

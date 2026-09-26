@@ -75,28 +75,28 @@ const sgLog = () => { try { return fs.readFileSync(path.join(HOME_T, "logs", "sg
   // ---------- B 空闲转发进程被上限修剪 ----------
   title("B 空闲转发进程被 CLIENT_MAX 上限修剪（keep-alive 真实客户端）");
   info("先看：keep-alive 客户端会持有 SSE GET 流，空闲也不被 sessionTimeout 回收");
-  const keep = spawn("bash", [path.join(H.COPY, "keepalive.sh")], {
-    env: { ...H.baseEnv(HOME_T, PORT), BRIDGE_KEEPALIVE_CLIENT_MAX: "1", BRIDGE_KEEPALIVE_CLIENT_TARGET: "1" },
-    detached: true, stdio: "ignore",
-  });
-  keep.unref();
+  // 顺序刻意是「先建两个会话，再起守护」：守护一起就可能立刻把超限的那个剪掉，
+  // 反过来先起守护的话，「两台同时在」这个前提只存在很短的一个窗口，断言会抖。
   await mp(["daemon", "start"], "ka1.json");
   await mp(["daemon", "start"], "ka2.json");
   const k1 = await mp(["call", "tka1.read_file"], "ka1.json");
   await sleep(2500);                       // 让 tka1 成为「更老」的那个
   const k2 = await mp(["call", "tka2.read_file"], "ka2.json");
   ok(k1.code === 0 && k2.code === 0, "两个 keep-alive 客户端各自建立会话并调用成功");
-  await sleep(1000);
-  // 第二个客户端的转发进程可能要晚一点才被网关拉起来，等到两台同时在（上限 1 下的前提）
-  const bothOk = await waitFor(() => clients().length === 2, { timeout: 10000, label: "两台转发进程同时在" });
+  const bothOk = await waitFor(() => clients().length === 2, { timeout: 15000, label: "两台转发进程同时在" });
   const both = clients();
   ok(bothOk, "两台客户端的会话转发进程同时在（超出上限 1）", `pids=${both}`);
   const heldStream = /GET request for existing session/.test(sgLog());
   ok(heldStream, "证据：客户端持有 SSE GET 流（所以只靠 sessionTimeout 回收不到它）");
+  const keep = spawn("bash", [path.join(H.COPY, "keepalive.sh")], {
+    env: { ...H.baseEnv(HOME_T, PORT), BRIDGE_KEEPALIVE_CLIENT_MAX: "1", BRIDGE_KEEPALIVE_CLIENT_TARGET: "1" },
+    detached: true, stdio: "ignore",
+  });
+  keep.unref();
   info("等 keepalive 按空闲顺序修剪...");
-  await sleep(12000);
+  const pruned = await waitFor(() => clients().length === 1, { timeout: 40000, label: "上限修剪生效" });
   const afterPrune = clients();
-  ok(afterPrune.length === 1, "上限修剪生效：最久没活动的那条会话转发进程被回收", `pids=${afterPrune}（掉线 ${both.filter((p) => !afterPrune.includes(p))}）`);
+  ok(pruned, "上限修剪生效：最久没活动的那条会话转发进程被回收", `pids=${afterPrune}（掉线 ${both.filter((p) => !afterPrune.includes(p))}）`);
   // 关掉守护再验证重建，否则它每 5s 会继续按上限修剪，进程数断言会抖
   try { process.kill(-keep.pid, "SIGKILL"); } catch (_) { try { keep.kill("SIGKILL"); } catch (__) {} }
   await sleep(1500);

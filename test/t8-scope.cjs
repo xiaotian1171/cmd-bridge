@@ -40,11 +40,18 @@ function startDecoy() {
   return p.pid;
 }
 
+// 脚本目录（做 ERE 转义），用于拼出「本套脚本自己的 keepalive.sh」匹配式
+function SD_RE() {
+  return H.COPY.replace(/[][\\\\.^$*+?(){}|]/g, (m) => "\\" + m);
+}
+
 const kaLog = (h) => { try { return fs.readFileSync(`${h}/keepalive.log`, "utf8"); } catch (_) { return ""; } };
 
 (async () => {
   let decoy = null;
   let ka = null;
+  let prodKa = null;
+  let strayPid = null;
   try {
     H.title("t8 操作范围（不误停其它桥/别人的进程）与守护抢重启");
     H.resetHome(A, TOK_A);
@@ -110,10 +117,61 @@ const kaLog = (h) => { try { return fs.readFileSync(`${h}/keepalive.log`, "utf8"
     const collateral = await H.waitFor(() => !alive(decoy) && H.sgPids(B).length === 0,
       { timeout: 10000, label: "legacy 语义的连带影响" });
     H.ok(collateral, "（反证）全量 pkill 会连带杀掉别人的同名进程与同机 B 的网关，所以默认必须为 0");
+    // ---------- 5) 守护自身的身份标记（生产启动方式：环境里没有 BRIDGE_*）----------
+    // 线上是 `setsid nohup bash keepalive.sh`，环境里没有任何 BRIDGE_ 变量。
+    // /proc/<pid>/environ 只反映 exec 时刻的环境，脚本内部 export 不会出现在守护
+    // 自己的 environ 里，所以必须靠守护自我 re-exec 才能被 stop.sh 精确识别。
+    H.title("生产启动方式下的守护身份（environ 里没有 BRIDGE_*）");
+    const KA_HOME = "/tmp/bridge-test-t8-ka";
+    const KA_BRIDGE = `${KA_HOME}/.bridge`;
+    const KA_PORT = 8811;
+    fs.rmSync(KA_HOME, { recursive: true, force: true });
+    fs.mkdirSync(KA_BRIDGE, { recursive: true });
+    const kaProd = spawn("bash", [path.join(H.COPY, "keepalive.sh")], {
+      env: { PATH: process.env.PATH, HOME: KA_HOME, BRIDGE_PORT: String(KA_PORT) },
+      detached: true, stdio: ["ignore", "ignore", "ignore"],
+    });
+    kaProd.unref();
+    prodKa = kaProd.pid;
+    await H.waitFor(() => alive(kaProd.pid), { timeout: 5000, label: "生产方式的守护" });
+    await new Promise((r) => setTimeout(r, 1500));
+    const kaEnv = (() => {
+      try { return fs.readFileSync(`/proc/${kaProd.pid}/environ`, "utf8"); } catch (_) { return ""; }
+    })();
+    H.ok(kaEnv.split("\0").includes(`BRIDGE_OWNER=${KA_BRIDGE}`),
+      "守护自身 environ 里带着 BRIDGE_OWNER（自我 re-exec 生效）",
+      `pid=${kaProd.pid}`);
+    const kaOwned = H.ownedPids(KA_BRIDGE, `${SD_RE()}/keepalive\\.sh`);
+    H.ok(kaOwned.includes(String(kaProd.pid)), "stop.sh 的 owned 口径能认出这个守护（不再只能靠旧实例推断）",
+      `owned=${kaOwned}`);
+    const kaStop = await H.run(path.join(H.COPY, "stop.sh"), [],
+      { ...process.env, HOME: KA_HOME, BRIDGE_HOME: KA_BRIDGE, BRIDGE_PORT: String(KA_PORT) });
+    H.ok(kaStop.code === 0 && /已停止/.test(kaStop.out),
+      "stop.sh 按身份停止了这个守护（输出里有「已停止」）",
+      `code=${kaStop.code} out=${kaStop.out.split("\n").find((l) => l.includes("keepalive") || l.includes("已停止")) || ""}`);
+    const kaGone = await H.waitFor(() => !alive(kaProd.pid), { timeout: 15000, label: "守护退出" });
+    H.ok(kaGone, "生产方式启动的守护已被停掉（首切后不会留下停不掉的旧守护）", `pid=${kaProd.pid}`);
+
+    // 改造前启动的守护：命令行匹配、但没有任何标记。凭本桥独占资源无法判定归属，
+    // stop.sh 只能提示人工确认，绝不能误杀（万一它其实是同机另一套桥的守护）。
+    const stray = spawn("bash", ["-c", `exec -a ${path.join(H.COPY, "keepalive.sh")} sleep 900`], {
+      env: { PATH: process.env.PATH, HOME: "/tmp/bridge-test-t8-stray" }, detached: true, stdio: "ignore",
+    });
+    stray.unref();
+    strayPid = stray.pid;
+    await new Promise((r) => setTimeout(r, 800));
+    H.ok(alive(strayPid), "无标记守护（模拟改造前启动）已在运行", `pid=${strayPid}`);
+    const stopStray = await H.run(path.join(H.COPY, "stop.sh"), [],
+      { ...process.env, HOME: KA_HOME, BRIDGE_HOME: KA_BRIDGE, BRIDGE_PORT: String(KA_PORT) });
+    H.ok(/警告/.test(stopStray.out) && stopStray.out.includes(String(strayPid)),
+      "stop.sh 提示「无法判定归属的守护进程」并要求人工确认");
+    H.ok(alive(strayPid), "无标记守护没有被误杀（首切时需人工确认后停掉）");
   } catch (e) {
     H.ok(false, "t8 执行未抛异常", String((e && e.stack) || e).slice(0, 300));
   } finally {
     if (ka) { try { process.kill(ka.pid, "SIGKILL"); } catch (_) {} }
+    if (prodKa) { try { process.kill(prodKa, "SIGKILL"); } catch (_) {} }
+    if (strayPid) { try { process.kill(strayPid, "SIGKILL"); } catch (_) {} }
     if (decoy) { try { process.kill(Number(decoy), "SIGKILL"); } catch (_) {} }
     await H.stopBridge(A, PORT_A).catch(() => {});
     await H.stopBridge(B, PORT_B).catch(() => {});
